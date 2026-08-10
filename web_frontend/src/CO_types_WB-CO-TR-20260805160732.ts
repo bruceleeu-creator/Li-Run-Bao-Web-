@@ -141,6 +141,8 @@ export interface DiagnosisFinding {
   status: string;
   /** 该发现的 A/B/C 选项是否由 AI 增强 */
   ai_enhanced: boolean;
+  /** rule | ai | rule+ai */
+  source?: string;
   options: DiagnosisOption[];
 }
 
@@ -150,6 +152,10 @@ export interface DiagnosisResponse {
   industry_fallback: boolean;
   vat_estimate_note: string;
   ai_used: boolean;
+  /** DeepSeek 新补充的发现条数（可选，旧缓存可能无此字段） */
+  ai_discover_count?: number;
+  /** 诊断阶段 AI 状态说明 */
+  ai_message?: string;
   years: number[];
   findings: DiagnosisFinding[];
 }

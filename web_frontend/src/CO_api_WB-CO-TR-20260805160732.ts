@@ -109,6 +109,21 @@ export async function confirmInteraction(userConfirmed = true): Promise<Interact
   });
 }
 
+/** 一键补全剩余 A/B/C 并确认，解锁导出（不重跑诊断）。 */
+export async function fastForwardInteraction(
+  optionLabel: "A" | "B" | "C" = "A",
+): Promise<InteractionState & { fast_forward?: boolean; auto_decisions?: number; already_unlocked?: boolean }> {
+  return request("/api/interaction/fast-forward", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      option_label: optionLabel,
+      strategy_note: "一键补全（沿用已有诊断，快速解锁导出）",
+      confirm: true,
+    }),
+  });
+}
+
 export async function importSample(): Promise<ImportResponse> {
   return request("/api/import/sample", { method: "POST" });
 }
@@ -230,6 +245,150 @@ export async function fetchReport(id: number): Promise<AIReportDetail> {
 
 export async function deleteReport(id: number): Promise<{ deleted: number }> {
   return request(`/api/ai/reports/${id}`, { method: "DELETE" });
+}
+
+// ── 导出（艺康体 Word / PDF / Excel） ─────────────────────────────────
+
+export interface ExportStatus {
+  ready: boolean;
+  unlocked: boolean;
+  reason: string;
+  company_name: string;
+  years: number[];
+  findings: number;
+  decisions: number;
+  feasibility_score?: number;
+  state?: string;
+  total_est_saving?: number;
+}
+
+export async function fetchExportStatus(): Promise<ExportStatus> {
+  return request("/api/export/status");
+}
+
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function filenameFromDisposition(cd: string, fallback: string): string {
+  const mStar = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  const mPlain = /filename="?([^";]+)"?/i.exec(cd);
+  if (mStar) {
+    try {
+      return decodeURIComponent(mStar[1]);
+    } catch {
+      return mStar[1];
+    }
+  }
+  if (mPlain) return mPlain[1];
+  return fallback;
+}
+
+/** 触发文件下载：POST 二进制流 + Content-Disposition 文件名。 */
+export async function downloadExport(
+  kind: "word" | "pdf" | "excel" | "budget",
+): Promise<void> {
+  // 预算三表：走异步任务（DeepSeek 多阶段，可能 1–3 分钟）
+  if (kind === "budget") {
+    await downloadBudgetExportAsync();
+    return;
+  }
+  const res = await fetch(`/api/export/${kind}`, { method: "POST" });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(detail);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") || "";
+  const fallback =
+    kind === "word"
+      ? "经营业绩分析与建议.docx"
+      : kind === "pdf"
+        ? "经营业绩分析与建议.pdf"
+        : "成本优化测算模型.xlsx";
+  triggerBlobDownload(blob, filenameFromDisposition(cd, fallback));
+}
+
+export interface BudgetExportJob {
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  stage: string;
+  progress: number;
+  message: string;
+  error?: string;
+  filename?: string;
+  download_ready?: boolean;
+  meta?: {
+    top_method?: string;
+    line_method?: string;
+    filled_lines?: number;
+    notes?: string[];
+  };
+}
+
+export async function startBudgetExportJob(): Promise<BudgetExportJob> {
+  return request("/api/export/budget/jobs", { method: "POST" });
+}
+
+export async function fetchBudgetExportJob(jobId: string): Promise<BudgetExportJob> {
+  return request(`/api/export/budget/jobs/${jobId}`);
+}
+
+export async function fetchActiveBudgetExportJob(): Promise<BudgetExportJob | null> {
+  const body = await request<{ job: BudgetExportJob | null }>("/api/export/budget/jobs/active");
+  return body.job;
+}
+
+/** 异步生成费用预算三表并下载；onProgress 可选进度回调。 */
+export async function downloadBudgetExportAsync(
+  onProgress?: (job: BudgetExportJob) => void,
+): Promise<void> {
+  const started = await startBudgetExportJob();
+  let job = started;
+  onProgress?.(job);
+  const deadline = Date.now() + 8 * 60 * 1000;
+  while (Date.now() < deadline) {
+    if (job.status === "completed" && job.download_ready) {
+      const res = await fetch(`/api/export/budget/jobs/${job.job_id}/download`);
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (typeof body?.detail === "string") detail = body.detail;
+        } catch {
+          /* ignore */
+        }
+        throw new Error(detail);
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      triggerBlobDownload(
+        blob,
+        filenameFromDisposition(cd, job.filename || "费用预算三表.xlsx"),
+      );
+      return;
+    }
+    if (job.status === "failed") {
+      throw new Error(job.error || job.message || "预算三表生成失败");
+    }
+    await new Promise((r) => setTimeout(r, 1200));
+    job = await fetchBudgetExportJob(job.job_id);
+    onProgress?.(job);
+  }
+  throw new Error("预算三表生成超时，请稍后在导出页重试");
 }
 
 export interface BudgetTopInputs {

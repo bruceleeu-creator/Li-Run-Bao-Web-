@@ -22,6 +22,10 @@ import {
   previewFiles,
   recommendIndustry,
   runDiagnosis,
+  downloadExport,
+  downloadBudgetExportAsync,
+  fetchExportStatus,
+  fastForwardInteraction,
   saveAIConfig,
   startInteraction,
   startYearsSummaryJob,
@@ -177,6 +181,13 @@ const EXPORT_ITEMS: readonly ExportDeliverable[] = [
   { id: "w", name: "导出 Word 报告", format: "Word", enabled: false, note: "完成诊断与互动后可用" },
   { id: "p", name: "导出 PDF 报告", format: "PDF", enabled: false, note: "完成诊断与互动后可用" },
   { id: "e", name: "导出测算模型", format: "Excel", enabled: false, note: "完成诊断与互动后可用" },
+  {
+    id: "b",
+    name: "导出费用预算三表",
+    format: "Excel",
+    enabled: false,
+    note: "DeepSeek 填充 · 与标准 budget_3sheet 同构",
+  },
 ] as const;
 
 // ── 后端健康状态（仅本机）──
@@ -444,7 +455,13 @@ function OverviewPage({
   aiJob,
   aiBlocked,
   aiConfigured,
+  diagnosisDone,
+  interactionDone,
+  exportUnlocked,
   onGenerateReport,
+  onRefreshSession,
+  onCaseReady,
+  onGoExport,
 }: {
   session: SessionResponse;
   aiReport: string;
@@ -453,7 +470,17 @@ function OverviewPage({
   aiJob: AIReportJob | null;
   aiBlocked: boolean;
   aiConfigured: boolean;
+  diagnosisDone: boolean;
+  interactionDone: boolean;
+  exportUnlocked: boolean;
   onGenerateReport: () => void;
+  onRefreshSession: () => Promise<void>;
+  onCaseReady: (state: {
+    diagnosisDone: boolean;
+    interactionDone: boolean;
+    exportUnlocked: boolean;
+  }) => void;
+  onGoExport: () => void;
 }) {
   const latest = session.indicators[session.indicators.length - 1];
   const cards = latest
@@ -463,6 +490,9 @@ function OverviewPage({
   const [reports, setReports] = useState<AIReportItem[]>([]);
   const [selectedReport, setSelectedReport] = useState<AIReportDetail | null>(null);
   const [reportsError, setReportsError] = useState("");
+  const [caseBusy, setCaseBusy] = useState(false);
+  const [caseMsg, setCaseMsg] = useState("");
+  const [caseError, setCaseError] = useState("");
 
   useEffect(() => {
     fetchReports()
@@ -486,6 +516,62 @@ function OverviewPage({
       if (selectedReport?.id === id) setSelectedReport(null);
     } catch (e) {
       setReportsError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  /** 沿用当前会话诊断，一键补全互动并解锁导出（不重做导入/诊断）。 */
+  const onUnlockExport = async () => {
+    setCaseBusy(true);
+    setCaseError("");
+    setCaseMsg("正在一键补全互动…");
+    try {
+      // 若尚无诊断，先跑规则诊断（快）；有则 fast-forward 复用
+      const diag = await fetchDiagnosis();
+      if (!diag.diagnosis || !diag.diagnosis.findings?.length) {
+        setCaseMsg("暂无诊断，正在快速规则诊断…");
+        await runDiagnosis();
+      }
+      const st = await fastForwardInteraction("A");
+      onCaseReady({
+        diagnosisDone: true,
+        interactionDone: true,
+        exportUnlocked: Boolean(st.is_export_unlocked),
+      });
+      setCaseMsg(
+        st.already_unlocked
+          ? "导出本已解锁，可直接去导出。"
+          : `已自动完成 ${st.auto_decisions ?? 0} 条互动并解锁导出。`,
+      );
+    } catch (e) {
+      setCaseError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCaseBusy(false);
+    }
+  };
+
+  /** 载入示例完整案例：导入示例 → 规则诊断 → 一键互动解锁（测导出用）。 */
+  const onLoadDemoCase = async () => {
+    setCaseBusy(true);
+    setCaseError("");
+    setCaseMsg("正在载入示例数据…");
+    try {
+      await importSample();
+      await onRefreshSession();
+      setCaseMsg("示例已导入，正在规则诊断…");
+      await runDiagnosis();
+      setCaseMsg("诊断完成，一键补全互动…");
+      const st = await fastForwardInteraction("A");
+      await onRefreshSession();
+      onCaseReady({
+        diagnosisDone: true,
+        interactionDone: true,
+        exportUnlocked: Boolean(st.is_export_unlocked),
+      });
+      setCaseMsg("示例完整案例已就绪，可直接导出 Word / 预算三表。");
+    } catch (e) {
+      setCaseError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCaseBusy(false);
     }
   };
 
@@ -516,6 +602,68 @@ function OverviewPage({
         ) : (
           <p className="panel__note">尚未导入财报。请前往「财报导入」上传 Excel/CSV 或载入示例数据。</p>
         )}
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title">当前工作案例</h2>
+        <p className="panel__note">
+          升级后若导出被锁：不必重新导入/诊断。有会话即可「一键补全互动」解锁；或载入示例完整链路快速测导出。
+        </p>
+        <div className="diag-summary" style={{ marginBottom: 12 }}>
+          <div className="diag-metric">
+            <span className="diag-metric__label">导入</span>
+            <strong className="diag-metric__value">{session.session ? "✓" : "—"}</strong>
+          </div>
+          <div className="diag-metric">
+            <span className="diag-metric__label">诊断</span>
+            <strong className="diag-metric__value">{diagnosisDone ? "✓" : "—"}</strong>
+          </div>
+          <div className="diag-metric">
+            <span className="diag-metric__label">互动</span>
+            <strong className="diag-metric__value">{interactionDone ? "✓" : "—"}</strong>
+          </div>
+          <div className="diag-metric">
+            <span className="diag-metric__label">导出</span>
+            <strong className="diag-metric__value">{exportUnlocked ? "✓" : "锁"}</strong>
+          </div>
+        </div>
+        <div className="ai-actions">
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={caseBusy || !session.session}
+            onClick={() => void onUnlockExport()}
+          >
+            {caseBusy ? "处理中…" : exportUnlocked ? "已解锁（可再点刷新）" : "一键补全互动并解锁导出"}
+          </button>
+          <button
+            type="button"
+            className="btn btn--ai"
+            disabled={caseBusy}
+            onClick={() => void onLoadDemoCase()}
+          >
+            载入示例完整案例
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={!exportUnlocked && !session.session}
+            onClick={onGoExport}
+          >
+            去导出页
+          </button>
+        </div>
+        {caseMsg ? <p className="panel__note">{caseMsg}</p> : null}
+        {caseError ? <div className="status status--error" role="alert">{caseError}</div> : null}
+        {session.session ? (
+          <p className="panel__note">
+            当前案例：<strong>{session.session.company_name}</strong>
+            {" · "}
+            {session.session.industry}
+            {" · "}
+            {(session.session.years || []).join(" / ") || "年份—"}
+          </p>
+        ) : null}
       </section>
       <section className="panel">
         <h2 className="panel__title">AI 合并报告</h2>
@@ -1445,13 +1593,22 @@ function DiagnosisPage({
   onDiagnosisDone,
 }: {
   session: SessionResponse;
-  onDiagnosisDone: (done: boolean) => void;
+  onDiagnosisDone: (done: boolean, meta?: { resetDownstream?: boolean }) => void;
 }) {
   const [diagnosis, setDiagnosis] = useState<DiagnosisResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
 
+  const applyDiagnosis = useCallback(
+    (fresh: DiagnosisResponse, meta?: { resetDownstream?: boolean }) => {
+      setDiagnosis(fresh);
+      onDiagnosisDone(fresh.findings.length > 0, meta);
+    },
+    [onDiagnosisDone],
+  );
+
+  /** 首次进入：有缓存则展示缓存；无缓存则自动跑一轮诊断。 */
   const loadDiagnosis = useCallback(async () => {
     if (!session.session) {
       setDiagnosis(null);
@@ -1463,13 +1620,11 @@ function DiagnosisPage({
     try {
       const saved = await fetchDiagnosis();
       if (saved.diagnosis) {
-        setDiagnosis(saved.diagnosis);
-        onDiagnosisDone(saved.diagnosis.findings.length > 0);
+        applyDiagnosis(saved.diagnosis);
       } else {
-        // 无已保存诊断：自动执行第一轮诊断（规则 + AI 增强）
+        // 无已保存诊断：自动执行第一轮诊断（规则 + DeepSeek）
         const fresh = await runDiagnosis();
-        setDiagnosis(fresh);
-        onDiagnosisDone(fresh.findings.length > 0);
+        applyDiagnosis(fresh);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1477,14 +1632,28 @@ function DiagnosisPage({
     } finally {
       setBusy(false);
     }
-  }, [session.session, onDiagnosisDone]);
+  }, [session.session, onDiagnosisDone, applyDiagnosis]);
 
   useEffect(() => {
     void loadDiagnosis();
   }, [loadDiagnosis]);
 
+  /** 重新诊断：强制 POST /api/diagnosis/run，不走缓存；下游互动/导出状态一并重置。 */
   const onRerun = () => {
-    void loadDiagnosis();
+    if (!session.session || busy) return;
+    setBusy(true);
+    setError("");
+    void (async () => {
+      try {
+        const fresh = await runDiagnosis();
+        applyDiagnosis(fresh, { resetDownstream: true });
+        setExpanded(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(false);
+      }
+    })();
   };
 
   const fmtMoney = (v: number) => `¥ ${(v / 10000).toLocaleString("zh-CN", { maximumFractionDigits: 1 })} 万`;
@@ -1522,7 +1691,16 @@ function DiagnosisPage({
         ) : diagnosis ? (
           <>
             <div className={`diag-ai-status${diagnosis.ai_used ? " is-on" : ""}`}>
-              {diagnosis.ai_used ? "● AI 已介入（选项由 AI 增强）" : "○ 规则引擎诊断（AI 未配置，选项为规则生成）"}
+              {diagnosis.ai_used
+                ? `● AI 已介入${
+                    typeof diagnosis.ai_discover_count === "number" && diagnosis.ai_discover_count > 0
+                      ? `（DeepSeek 补充 ${diagnosis.ai_discover_count} 条）`
+                      : "（选项/发现已增强）"
+                  }`
+                : "○ 规则引擎诊断（AI 未配置，选项为规则生成）"}
+              {diagnosis.ai_message ? (
+                <div className="panel__note" style={{ marginTop: 6 }}>{diagnosis.ai_message}</div>
+              ) : null}
             </div>
 
             <div className="diag-summary">
@@ -1848,42 +2026,159 @@ function InteractionPage({
 }
 
 function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked: boolean }) {
+  const [busyKind, setBusyKind] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [statusNote, setStatusNote] = useState("");
+  const [budgetProgress, setBudgetProgress] = useState("");
+
+  useEffect(() => {
+    if (!session.session) return;
+    void fetchExportStatus()
+      .then((s) => {
+        if (s.ready) {
+          setStatusNote(
+            `企业 ${s.company_name || "—"} · ${s.findings} 条发现 · ${s.decisions} 条决策`
+            + (s.unlocked ? " · 已解锁" : ` · ${s.reason || "未解锁"}`),
+          );
+        }
+      })
+      .catch(() => {
+        /* ignore */
+      });
+  }, [session.session, unlocked]);
+
+  const onExport = (kind: "word" | "pdf" | "excel" | "budget") => {
+    // 预算三表：导入后即可导出；其余需解锁
+    if (kind !== "budget" && !unlocked) return;
+    if (busyKind) return;
+    setBusyKind(kind);
+    setError("");
+    setBudgetProgress("");
+    void (async () => {
+      try {
+        if (kind === "budget") {
+          await downloadBudgetExportAsync((job) => {
+            const pct = typeof job.progress === "number" ? `${job.progress}%` : "";
+            const filled = job.meta?.filled_lines != null ? ` · 已填 ${job.meta.filled_lines}/84 行` : "";
+            setBudgetProgress(`${job.stage || ""} ${pct} ${job.message || ""}${filled}`.trim());
+          });
+        } else {
+          await downloadExport(kind);
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusyKind(null);
+      }
+    })();
+  };
+
+  const kindOf = (id: string): "word" | "pdf" | "excel" | "budget" | null => {
+    if (id === "w") return "word";
+    if (id === "p") return "pdf";
+    if (id === "e") return "excel";
+    if (id === "b") return "budget";
+    return null;
+  };
+
   return (
     <section className="panel">
       <h2 className="panel__title">第二稿与导出</h2>
+      <p className="panel__note">
+        Word 采用「艺康体」小白版结构：先说结论 → 最以前/中间/现在 → 关键指标白话 → 将来建议 → 月度看板 → 落地清单。
+      </p>
       {!session.session ? (
         <p className="panel__note">尚未导入财报。请先完成导入、诊断与互动，再导出。</p>
-      ) : unlocked ? (
-        <>
-          <div className={`ai-config__status is-on`}>● 导出已解锁（互动已确认）</div>
-          <div className="export-grid">
-            {EXPORT_ITEMS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className="export-card export-card--enabled"
-                onClick={() => alert("导出功能将在后续版本生成实际文件（当前为流程解锁演示）。")}
-              >
-                <span className="export-card__format">{item.format}</span>
-                <strong>{item.name}</strong>
-                <span>{item.note ?? "待完成前置步骤"}</span>
-              </button>
-            ))}
-          </div>
-          <p className="panel__note">提示：Word/PDF/Excel 文件生成将在后续版本接入，当前仅验证流程解锁。</p>
-        </>
       ) : (
         <>
-          <div className="status status--warn">导出未解锁：请先完成财报导入、第一轮诊断与 A/B/C 互动并确认第二稿。</div>
+          {unlocked ? (
+            <div className="ai-config__status is-on">● 报告/测算导出已解锁（互动已确认）</div>
+          ) : (
+            <div className="status status--warn">
+              导出未解锁时：可点下方「一键补全互动解锁」（沿用已有诊断，无需重做导入/诊断）；预算三表导入后即可导出。
+              <div className="ai-actions" style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  disabled={busyKind !== null || !session.session}
+                  onClick={() => {
+                    setBusyKind("unlock");
+                    setError("");
+                    void (async () => {
+                      try {
+                        const diag = await fetchDiagnosis();
+                        if (!diag.diagnosis?.findings?.length) await runDiagnosis();
+                        const st = await fastForwardInteraction("A");
+                        if (st.is_export_unlocked) {
+                          // 通知父级：通过自定义事件轻量刷新
+                          window.dispatchEvent(
+                            new CustomEvent("lirunbao-export-unlocked", {
+                              detail: { unlocked: true },
+                            }),
+                          );
+                          setError("");
+                          setStatusNote("已一键解锁导出，可直接点击下方导出按钮。");
+                        }
+                      } catch (e) {
+                        setError(e instanceof Error ? e.message : String(e));
+                      } finally {
+                        setBusyKind(null);
+                      }
+                    })();
+                  }}
+                >
+                  {busyKind === "unlock" ? "解锁中…" : "一键补全互动解锁"}
+                </button>
+              </div>
+            </div>
+          )}
+          {statusNote ? <p className="panel__note">{statusNote}</p> : null}
+          {budgetProgress ? (
+            <div className="status status--info" role="status">
+              费用预算三表：{budgetProgress}
+            </div>
+          ) : null}
+          {error ? <div className="status status--error" role="alert">{error}</div> : null}
           <div className="export-grid">
-            {EXPORT_ITEMS.map((item) => (
-              <button key={item.id} type="button" className="export-card" disabled>
-                <span className="export-card__format">{item.format}</span>
-                <strong>{item.name}</strong>
-                <span>{item.note ?? "待完成前置步骤"}</span>
-              </button>
-            ))}
+            {EXPORT_ITEMS.map((item) => {
+              const kind = kindOf(item.id);
+              const busy = kind !== null && busyKind === kind;
+              const enabled = kind === "budget" ? true : unlocked;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={enabled ? "export-card export-card--enabled" : "export-card"}
+                  disabled={busy || !kind || !enabled}
+                  onClick={() => kind && onExport(kind)}
+                >
+                  <span className="export-card__format">{item.format}</span>
+                  <strong>
+                    {busy
+                      ? kind === "budget"
+                        ? "DeepSeek 提取中…"
+                        : "生成中…"
+                      : item.name}
+                  </strong>
+                  <span>
+                    {kind === "word"
+                      ? "经营业绩分析与建议（小白版）"
+                      : kind === "pdf"
+                        ? "同结构 PDF 交付稿"
+                        : kind === "excel"
+                          ? "成本优化测算模型（可逐月跟踪）"
+                          : kind === "budget"
+                            ? "异步：DeepSeek 多片段提取 + 规则补齐 · 标准三 Sheet"
+                            : item.note ?? ""}
+                  </span>
+                </button>
+              );
+            })}
           </div>
+          <p className="panel__note">
+            费用预算三表格式与标准模板一致（费用预算表 / 行业企业所得税贡献率参考 / 诊断与行动清单）。
+            配置 DeepSeek 后自动识别营收成本并分配费用行；未配置时用规则映射。
+          </p>
         </>
       )}
     </section>
@@ -2203,13 +2498,44 @@ export function App() {
   };
 
   // 稳定的流程状态回调（避免子页面 useCallback 依赖变化导致无限循环）
-  const handleDiagnosisDone = useCallback((done: boolean) => {
+  const handleDiagnosisDone = useCallback((done: boolean, meta?: { resetDownstream?: boolean }) => {
     setDiagnosisDone(done);
+    // 重新诊断后旧互动/导出状态作废
+    if (meta?.resetDownstream) {
+      setInteractionDone(false);
+      setExportUnlocked(false);
+    }
   }, []);
 
   const handleInteractionChange = useCallback((state: InteractionState) => {
     setInteractionDone(state.state === "DRAFT2" || state.state === "CONFIRMATION" || state.state === "FINAL");
     setExportUnlocked(state.is_export_unlocked);
+  }, []);
+
+  /** 总览/导出页一键补全后同步全局流程状态 */
+  const handleCaseReady = useCallback(
+    (state: { diagnosisDone: boolean; interactionDone: boolean; exportUnlocked: boolean }) => {
+      setDiagnosisDone(state.diagnosisDone);
+      setInteractionDone(state.interactionDone);
+      setExportUnlocked(state.exportUnlocked);
+    },
+    [],
+  );
+
+  const handleRefreshSession = useCallback(async () => {
+    const body = await fetchSession();
+    setSession(body);
+  }, []);
+
+  // 导出页「一键解锁」通过自定义事件通知父级（避免层层回调）
+  useEffect(() => {
+    const onUnlocked = () => {
+      setInteractionDone(true);
+      setExportUnlocked(true);
+      setDiagnosisDone(true);
+    };
+    window.addEventListener("lirunbao-export-unlocked", onUnlocked);
+    return () => window.removeEventListener("lirunbao-export-unlocked", onUnlocked);
   }, []);
 
   const renderPage = () => {
@@ -2224,7 +2550,13 @@ export function App() {
             aiJob={aiJob}
             aiBlocked={sessionClearing}
             aiConfigured={aiConfigured}
+            diagnosisDone={diagnosisDone}
+            interactionDone={interactionDone}
+            exportUnlocked={exportUnlocked}
             onGenerateReport={() => void handleGenerateReport()}
+            onRefreshSession={handleRefreshSession}
+            onCaseReady={handleCaseReady}
+            onGoExport={() => setCurrent("export")}
           />
         );
       case "import":

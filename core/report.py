@@ -18,6 +18,7 @@ from . import finance as fin
 from . import industry as ind_mod
 from .diagnostic import COMPLIANCE_NOTE, DiagnosisResult, Finding
 from .interactive import Draft2Entry, Session
+from .narrative import StageNarrative, build_stage_narrative
 
 
 class ReportError(Exception):
@@ -94,6 +95,11 @@ def _build_indicator_rows(sess: Session) -> List[List[str]]:
     return rows
 
 
+def _session_narrative(sess: Session) -> StageNarrative:
+    """基于会话生成阶段叙事（含互动决策）。"""
+    return build_stage_narrative(sess.data, sess.diagnosis, sess.decisions)
+
+
 def _render_chart_to_png(sess: Session, tmp_dir: str) -> Optional[str]:
     """渲染营收与增值税税负率双轴图；返回 PNG 路径，失败返回 None。"""
     try:
@@ -136,8 +142,51 @@ def _render_chart_to_png(sess: Session, tmp_dir: str) -> Optional[str]:
 
 # ── Word 报告 ─────────────────────────────────────────────────────────────
 
+def _set_run_eastasia(run, font_name: str = "Songti SC") -> None:
+    run.font.name = font_name
+    try:
+        from docx.oxml.ns import qn
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
+    except Exception:
+        pass
+
+
+def _add_callout_table(doc, text: str, fill: str = "FFF3CD") -> None:
+    """单格提示框（结论条 / 启发条），贴近艺康报告样式。"""
+    from docx.shared import Pt, RGBColor
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    table = doc.add_table(rows=1, cols=1)
+    table.style = "Table Grid"
+    cell = table.rows[0].cells[0]
+    cell.text = ""
+    p = cell.paragraphs[0]
+    run = p.add_run(text)
+    run.bold = True
+    run.font.size = Pt(11)
+    _set_run_eastasia(run)
+    # 背景色
+    try:
+        tc = cell._tc
+        tcPr = tc.get_or_add_tcPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:fill"), fill)
+        shd.set(qn("w:val"), "clear")
+        tcPr.append(shd)
+    except Exception:
+        pass
+    doc.add_paragraph("")
+
+
 def export_word(sess: Session, path: str, ai_fallback: str = "") -> str:
-    """生成 Word 报告（.docx）。返回路径；失败抛 ReportError。"""
+    """生成艺康体小白版 Word 经营分析报告（.docx）。
+
+    结构对齐《艺康装饰经营业绩分析与建议》：
+    封面 → 一句话结论 → 先说结论 → 跨年表 → 最以前/中间/现在 →
+    关键指标白话 → 将来建议 → 月度看板 → 落地清单 → 口径说明 →
+    附录（诊断发现 + 互动决策）。
+    """
     try:
         from docx import Document
         from docx.shared import Pt, Cm, RGBColor
@@ -147,81 +196,234 @@ def export_word(sess: Session, path: str, ai_fallback: str = "") -> str:
 
     try:
         doc = Document()
-        # 设置默认中文字体
         style = doc.styles["Normal"]
         style.font.name = "Songti SC"
-        style.font.size = Pt(10.5)
+        style.font.size = Pt(11)
         try:
             from docx.oxml.ns import qn
             style.element.rPr.rFonts.set(qn("w:eastAsia"), "Songti SC")
         except Exception:
             pass
 
-        # 封面
-        title = doc.add_heading("利润宝 · 企业财税优化方案", level=0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        narr = _session_narrative(sess)
+        years = list(sess.data.years or [])
+        year_span = (
+            f"{min(years)}-{max(years)}" if years else datetime.now().strftime("%Y")
+        )
+
+        # ── 封面（艺康体：公司名 + 年份 + 小白版副标题） ──
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.add_run(f"企业：{sess.data.company_name}\n行业：{sess.data.industry}\n期间：{sess.data.years}\n生成日期：{datetime.now().strftime('%Y-%m-%d')}")
+        r = p.add_run(narr.company_name or sess.data.company_name or "未命名企业")
+        r.bold = True
+        r.font.size = Pt(18)
+        _set_run_eastasia(r)
 
-        # 一、综合分析
-        doc.add_heading("一、综合分析", level=1)
-        doc.add_paragraph(f"企业名称：{sess.data.company_name}")
-        doc.add_paragraph(f"所属行业：{sess.data.industry}" + ("（未匹配，已回退制造业基准）" if sess.diagnosis.industry_fallback else ""))
-        doc.add_paragraph(f"分析年度：{', '.join(str(y) for y in sess.data.years)}")
-        # 指标表
-        doc.add_heading("年度核心指标", level=2)
-        rows = _build_indicator_rows(sess)
-        table = doc.add_table(rows=1 + len(rows), cols=6)
-        table.style = "Light Grid Accent 1"
-        hdr = table.rows[0].cells
-        for i, h in enumerate(["年度", "营业收入", "增值税税负率", "所得税税负率", "毛利率", "净利率"]):
-            hdr[i].text = h
-        for ri, row in enumerate(rows):
-            for ci, val in enumerate(row):
-                table.rows[ri + 1].cells[ci].text = val
-        # 增值税估算口径显著标注
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(f"{year_span}经营业绩分析与建议")
+        r.bold = True
+        r.font.size = Pt(16)
+        _set_run_eastasia(r)
+
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(narr.subtitle)
+        r.font.size = Pt(12)
+        r.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+        _set_run_eastasia(r)
+
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(
+            (narr.data_source_note or "")
+            + f"\n行业：{narr.industry}"
+            + ("（基准已回退制造业）" if sess.diagnosis.industry_fallback else "")
+        )
+        r.font.size = Pt(10)
+        _set_run_eastasia(r)
+
+        # 一句话结论框
+        if narr.one_liner:
+            _add_callout_table(doc, narr.one_liner, fill="E8F4FD")
+
+        # ── 一、先说结论 ──
+        doc.add_heading("一、先说结论：公司这几年到底怎么样", level=1)
+        # 把 headline 拆成多段（按句号）
+        for part in (narr.headline or "").split("。"):
+            part = part.strip()
+            if part:
+                doc.add_paragraph(part + "。")
+        # 高风险发现再补 1-2 句
+        highs = [f for f in sess.diagnosis.findings if f.severity == "高"][:2]
+        for f in highs:
+            doc.add_paragraph(f"{f.title}：{f.fact}")
+
+        # 跨年对照表
+        if narr.year_rows:
+            doc.add_paragraph("")
+            yt = doc.add_table(rows=1 + len(narr.year_rows), cols=6)
+            yt.style = "Light Grid Accent 1"
+            headers = ["年度", "收入", "净利润", "毛利率", "净利率", "一句话理解"]
+            for i, h in enumerate(headers):
+                yt.rows[0].cells[i].text = h
+            for ri, row in enumerate(narr.year_rows):
+                cells = yt.rows[ri + 1].cells
+                cells[0].text = str(row.year)
+                cells[1].text = row.revenue
+                cells[2].text = row.net_profit
+                cells[3].text = row.gross_margin
+                cells[4].text = row.net_margin
+                cells[5].text = row.one_liner
+
+        # ── 二/三/四：阶段故事 ──
+        stage_labels = []
+        for st in narr.stages:
+            if st.title.startswith("最以前"):
+                stage_labels.append(("二", st))
+            elif st.title.startswith("中间"):
+                stage_labels.append(("三", st))
+            else:
+                stage_labels.append(("四", st))
+        # 若只有 1-2 段，序号仍从二起
+        if not stage_labels and narr.stages:
+            stage_labels = [(str(i + 2), st) for i, st in enumerate(narr.stages)]
+
+        for num, st in stage_labels:
+            doc.add_heading(f"{num}、{st.title}", level=1)
+            doc.add_paragraph(st.summary)
+            for b in st.bullets:
+                doc.add_paragraph(b, style="List Bullet")
+            # 「现在」展开 H2 要点
+            if st.title.startswith("现在") and narr.now_points:
+                for pt in narr.now_points:
+                    doc.add_heading(pt.title, level=2)
+                    doc.add_paragraph(pt.body)
+
+        if narr.stage_insight:
+            _add_callout_table(doc, narr.stage_insight, fill="FFF8E7")
+
+        # ── 五、关键指标白话 ──
+        doc.add_heading("五、用小白语言看懂关键指标", level=1)
+        if narr.now_metrics:
+            mt = doc.add_table(rows=1 + len(narr.now_metrics), cols=4)
+            mt.style = "Light Grid Accent 1"
+            for i, h in enumerate(["指标", "小白解释", "当前情况", "管理判断"]):
+                mt.rows[0].cells[i].text = h
+            for ri, m in enumerate(narr.now_metrics):
+                mt.rows[ri + 1].cells[0].text = m.name
+                mt.rows[ri + 1].cells[1].text = m.plain
+                mt.rows[ri + 1].cells[2].text = m.value_text
+                mt.rows[ri + 1].cells[3].text = m.judgment
+
+        # 税负估算注
         note_p = doc.add_paragraph()
         run = note_p.add_run(f"注：增值税税负率为 {fin.VAT_ESTIMATE_NOTE}，实际以申报数据为准。")
         run.bold = True
         run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
 
-        # 图表
+        # 趋势图
         tmp_dir = os.path.dirname(path) or "."
         chart_path = _render_chart_to_png(sess, tmp_dir)
         if chart_path and os.path.exists(chart_path):
-            doc.add_picture(chart_path, width=Cm(15))
-            cap = doc.add_paragraph("图：营业收入与增值税税负率趋势")
-            cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            try:
+                doc.add_picture(chart_path, width=Cm(15))
+                cap = doc.add_paragraph("图：营业收入与增值税税负率趋势")
+                cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except Exception:
+                pass
 
-        # 二、诊断发现
-        doc.add_heading("二、第一轮诊断发现", level=1)
+        # ── 六、将来 ──
+        next_year = (max(years) + 1) if years else datetime.now().year + 1
+        doc.add_heading(f"六、将来：{next_year}年以后建议怎么做", level=1)
+        doc.add_paragraph(
+            "未来不要只追求「收入做大」，更要追求「收入能赚钱、利润能回款、现金不断档」。"
+            "建议按下面顺序推进。"
+        )
+        if narr.decision_summaries:
+            doc.add_paragraph("（已结合互动决策）")
+            for s in narr.decision_summaries:
+                doc.add_paragraph(s, style="List Bullet")
+        ordinals = ["第一", "第二", "第三", "第四", "第五", "第六", "第七", "第八", "第九", "第十"]
+        for i, a in enumerate(narr.future_actions):
+            if a.startswith("针对") or a[:1].isdigit():
+                doc.add_paragraph(a)
+            elif i < len(ordinals):
+                doc.add_paragraph(f"{ordinals[i]}，{a}")
+            else:
+                doc.add_paragraph(f"{i + 1}. {a}")
+
+        doc.add_paragraph(
+            f"落地性评分：{sess.feasibility_score:.2f}%；"
+            f"方案合计预计净影响：{_fmt_money(sess.total_est_saving)}。"
+        )
+
+        # ── 七、每月 8 个数 ──
+        doc.add_heading("七、建议老板每月只盯这些数", level=1)
+        if narr.monthly_rows:
+            mt = doc.add_table(rows=1 + len(narr.monthly_rows), cols=3)
+            mt.style = "Light Grid Accent 1"
+            for i, h in enumerate(["每月看什么", "为什么看", "建议动作"]):
+                mt.rows[0].cells[i].text = h
+            for ri, row in enumerate(narr.monthly_rows):
+                mt.rows[ri + 1].cells[0].text = row.metric
+                mt.rows[ri + 1].cells[1].text = row.why
+                mt.rows[ri + 1].cells[2].text = row.how
+        else:
+            for k in narr.monthly_kpis:
+                doc.add_paragraph(k, style="List Bullet")
+
+        # ── 八、落地清单 ──
+        doc.add_heading("八、落地清单：从现在开始怎么动", level=1)
+        if narr.timeline:
+            mt = doc.add_table(rows=1 + len(narr.timeline), cols=3)
+            mt.style = "Light Grid Accent 1"
+            for i, h in enumerate(["时间", "要做的事", "目的"]):
+                mt.rows[0].cells[i].text = h
+            for ri, item in enumerate(narr.timeline):
+                mt.rows[ri + 1].cells[0].text = item.when
+                mt.rows[ri + 1].cells[1].text = item.action
+                mt.rows[ri + 1].cells[2].text = item.purpose
+
+        # ── 九、数据口径 ──
+        doc.add_heading("九、数据口径说明", level=1)
+        for note in narr.methodology_notes:
+            doc.add_paragraph(note)
+        doc.add_paragraph(
+            "估算公式：估算增值税 = 税金及附加 ÷ 12%；税负率 = 估算增值税 ÷ 营业收入 × 100%。"
+            "如能直连开票/申报系统可取真实应纳税额，则应替换为本口径。"
+        )
+
+        # ── 附录 A：诊断发现 ──
+        doc.add_heading("附录 A：第一轮诊断发现", level=1)
         if sess.diagnosis.findings:
+            doc.add_paragraph(
+                f"共识别 {len(sess.diagnosis.findings)} 条问题/机会"
+                f"（高 {sum(1 for f in sess.diagnosis.findings if f.severity=='高')} / "
+                f"中 {sum(1 for f in sess.diagnosis.findings if f.severity=='中')} / "
+                f"低 {sum(1 for f in sess.diagnosis.findings if f.severity=='低')}）。"
+            )
             for f in sess.diagnosis.findings:
                 doc.add_heading(f"{f.title}（严重度：{f.severity}）", level=2)
                 doc.add_paragraph(f"事实：{f.fact}")
                 doc.add_paragraph(f"行业对标：{f.benchmark}")
                 doc.add_paragraph(f"初稿建议：{f.suggestion}")
-                doc.add_paragraph("可选方案：")
                 for opt in f.options:
                     doc.add_paragraph(
-                        f"  {opt.label}. {opt.name}\n"
-                        f"     描述：{opt.description}\n"
-                        f"     目标值：{opt.target_value:,.2f}；预计节税：{_fmt_money(opt.est_saving)}；"
-                        f"可行性：{opt.feasibility}；风险：{opt.risk_level}",
+                        f"{opt.label}. {opt.name}：{opt.description}"
+                        f"（目标 {opt.target_value:,.2f}{f.unit}；净影响 {_fmt_money(opt.est_saving)}）",
                         style="List Bullet",
                     )
         else:
             doc.add_paragraph("未发现明显异常，主要指标处于行业合理区间。")
 
-        # 三、第二稿（互动决策）
-        doc.add_heading("三、第二稿（互动决策与增值测算）", level=1)
+        # ── 附录 B：互动第二稿 ──
+        doc.add_heading("附录 B：互动决策与第二稿", level=1)
         if sess.draft2:
             t2 = doc.add_table(rows=1 + len(sess.draft2), cols=6)
             t2.style = "Light Grid Accent 1"
-            hdr2 = t2.rows[0].cells
-            for i, h in enumerate(["发现", "选项", "当前值", "目标值", "变动幅度", "预计节税"]):
-                hdr2[i].text = h
+            for i, h in enumerate(["发现", "选项", "当前值", "目标值", "变动幅度", "预计净影响"]):
+                t2.rows[0].cells[i].text = h
             for ri, e in enumerate(sess.draft2):
                 cells = t2.rows[ri + 1].cells
                 cells[0].text = e.finding_title
@@ -230,53 +432,32 @@ def export_word(sess: Session, path: str, ai_fallback: str = "") -> str:
                 cells[3].text = f"{e.target_value:,.2f}"
                 cells[4].text = e.change_pct
                 cells[5].text = _fmt_money(e.est_saving)
-            # 操作细节与注意事项
-            doc.add_heading("操作细节与注意事项", level=2)
             for e in sess.draft2:
                 doc.add_heading(e.finding_title, level=3)
                 doc.add_paragraph(f"选项：{e.option_label}. {e.option_name}")
-                doc.add_paragraph(f"趋势（环比同比）：{e.trend}")
+                doc.add_paragraph(f"趋势：{e.trend}")
                 doc.add_paragraph(f"操作细节：{e.action_detail}")
                 doc.add_paragraph(f"注意事项：{e.cautions}")
         else:
-            doc.add_paragraph("无决策记录。")
+            doc.add_paragraph("尚无互动决策记录。完成 A/B/C 互动后此处将展示第二稿明细。")
 
-        # 四、完整方案（预计节税汇总）
-        doc.add_heading("四、完整方案与预计节税汇总", level=1)
-        doc.add_paragraph(f"总预计节税：{_fmt_money(sess.total_est_saving)}")
-        doc.add_paragraph(f"落地性评分：{sess.feasibility_score:.2f}%")
-        if sess.feasibility_breakdown:
-            doc.add_paragraph("扣分明细：")
-            for b in sess.feasibility_breakdown:
-                doc.add_paragraph(b, style="List Bullet")
-        doc.add_paragraph(f"状态：{sess.state}")
         if sess.strategy_notes:
             doc.add_heading("战略意图记录", level=2)
-            for n in sess.strategy_notes:
-                doc.add_paragraph(n, style="List Bullet")
+            for note in sess.strategy_notes:
+                doc.add_paragraph(note, style="List Bullet")
 
-        # 五、合规声明
-        doc.add_heading("五、合规声明", level=1)
+        # ── 合规 ──
+        doc.add_heading("合规声明", level=1)
         p = doc.add_paragraph(COMPLIANCE_NOTE)
-        p.runs[0].bold = True
+        if p.runs:
+            p.runs[0].bold = True
         doc.add_paragraph(
-            "本工具所有优化建议均属于合法税务筹划范畴，包括但不限于：研发费用加计扣除、"
-            "小微企业优惠、高新技术企业优惠、限额内费用据实扣除、业务模式优化等。"
+            "本报告优化建议限于合法税务筹划与经营管理范畴，包括但不限于：研发费用加计扣除、"
+            "限额内据实扣除、业务模式与回款优化等。严禁虚开发票、隐匿收入、虚构成本。"
         )
 
-        # 六、增值税估算口径说明
-        doc.add_heading("六、增值税税负率估算口径说明", level=1)
-        doc.add_paragraph(
-            "本报告所列增值税税负率为估算值，非真实应纳税额。"
-            "估算公式：估算增值税 = 税金及附加 ÷ 12%（增值税附加税费占增值税比例的经验值），"
-            "税负率 = 估算增值税 ÷ 营业收入 × 100%。"
-            "如能直连开票/申报系统可取真实应纳税额，则应替换为本口径。"
-            "实际税务申报与稽查以企业增值税申报表为准。"
-        )
-
-        # 附录
         if ai_fallback:
-            doc.add_heading("附录：AI 增强状态", level=1)
+            doc.add_heading("附录 C：AI 增强状态", level=1)
             doc.add_paragraph(ai_fallback)
 
         doc.save(path)
@@ -387,23 +568,56 @@ def export_pdf(sess: Session, path: str, ai_fallback: str = "") -> str:
         title_style = ParagraphStyle("TitleCJK", parent=styles["Title"], fontName=cjk_font, fontSize=22, leading=30, alignment=1, textColor=colors.HexColor("#1e3a8a"))
 
         story = []
+        narr = _session_narrative(sess)
         # 封面
         story.append(Paragraph("利润宝 · 企业财税优化方案", title_style))
         story.append(Spacer(1, 0.5 * cm))
         story.append(Paragraph(
             f"企业：{sess.data.company_name}<br/>行业：{sess.data.industry}<br/>"
-            f"期间：{sess.data.years}<br/>生成日期：{datetime.now().strftime('%Y-%m-%d')}",
+            f"期间：{sess.data.years}<br/>生成日期：{datetime.now().strftime('%Y-%m-%d')}<br/>"
+            "小白版：用看得懂的话，讲最以前、现在和将来",
             body,
         ))
         story.append(Spacer(1, 0.5 * cm))
 
-        # 一、综合分析
-        story.append(Paragraph("一、综合分析", h1))
-        story.append(Paragraph(f"企业名称：{sess.data.company_name}", body))
+        # 一、结论
+        story.append(Paragraph("一、先说结论：公司这几年到底怎么样", h1))
+        story.append(Paragraph(_clean_pdf_text(narr.headline), body))
         fallback_text = "（未匹配，已回退制造业基准）" if sess.diagnosis.industry_fallback else ""
-        story.append(Paragraph(f"所属行业：{sess.data.industry}{fallback_text}", body))
-        story.append(Paragraph(f"分析年度：{', '.join(str(y) for y in sess.data.years)}", body))
-        story.append(Paragraph("年度核心指标", h2))
+        story.append(Paragraph(
+            f"企业：{sess.data.company_name}；行业：{sess.data.industry}{fallback_text}；"
+            f"年度：{', '.join(str(y) for y in sess.data.years)}",
+            body,
+        ))
+
+        # 二、各阶段
+        story.append(Paragraph("二、各阶段经营情况", h1))
+        for st in narr.stages:
+            story.append(Paragraph(_clean_pdf_text(st.title), h2))
+            story.append(Paragraph(_clean_pdf_text(st.summary), body))
+            for b in st.bullets:
+                story.append(Paragraph(f"* {_clean_pdf_text(b)}", body))
+
+        # 三、白话指标
+        story.append(Paragraph("三、现在：关键指标白话解读", h1))
+        if narr.now_metrics:
+            m_data = [["指标", "小白解释", "当前情况", "管理判断"]]
+            for m in narr.now_metrics:
+                m_data.append([m.name, m.plain, m.value_text, m.judgment])
+            mt = Table(m_data, repeatRows=1, colWidths=[3 * cm, 5 * cm, 3.5 * cm, 4 * cm])
+            mt.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, -1), cjk_font),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e40af")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(mt)
+            story.append(Spacer(1, 0.3 * cm))
+
+        # 四、指标表 + 图
+        story.append(Paragraph("四、综合分析（年度指标表）", h1))
         rows = _build_indicator_rows(sess)
         table_data = [["年度", "营业收入", "增值税税负率", "所得税税负率", "毛利率", "净利率"]] + rows
         t = Table(table_data, repeatRows=1)
@@ -420,7 +634,6 @@ def export_pdf(sess: Session, path: str, ai_fallback: str = "") -> str:
         story.append(Paragraph(f"注：增值税税负率为 {fin.VAT_ESTIMATE_NOTE}，实际以申报数据为准。", note_style))
         story.append(Spacer(1, 0.3 * cm))
 
-        # 图表
         tmp_dir = os.path.dirname(path) or "."
         chart_path = _render_chart_to_png(sess, tmp_dir)
         if chart_path and os.path.exists(chart_path):
@@ -431,18 +644,24 @@ def export_pdf(sess: Session, path: str, ai_fallback: str = "") -> str:
             except Exception:
                 pass
 
-        # 二、诊断发现
+        # 五、诊断发现
         story.append(PageBreak())
-        story.append(Paragraph("二、第一轮诊断发现", h1))
+        story.append(Paragraph("五、第一轮诊断发现", h1))
         if sess.diagnosis.findings:
+            story.append(Paragraph(
+                f"共识别 {len(sess.diagnosis.findings)} 条问题/机会"
+                f"（高 {sum(1 for f in sess.diagnosis.findings if f.severity=='高')} / "
+                f"中 {sum(1 for f in sess.diagnosis.findings if f.severity=='中')} / "
+                f"低 {sum(1 for f in sess.diagnosis.findings if f.severity=='低')}）。",
+                body,
+            ))
             for f in sess.diagnosis.findings:
                 story.append(Paragraph(f"{f.title}（严重度：{f.severity}）", h2))
-                story.append(Paragraph(f"事实：{f.fact}", body))
-                story.append(Paragraph(f"行业对标：{f.benchmark}", body))
-                story.append(Paragraph(f"初稿建议：{f.suggestion}", body))
+                story.append(Paragraph(f"事实：{_clean_pdf_text(f.fact)}", body))
+                story.append(Paragraph(f"行业对标：{_clean_pdf_text(f.benchmark)}", body))
+                story.append(Paragraph(f"初稿建议：{_clean_pdf_text(f.suggestion)}", body))
                 story.append(Paragraph("可选方案：", body))
                 for opt in f.options:
-                    # 清理 &nbsp; / •；用全角空格替代 HTML 实体，避免 ReportLab 解析异常
                     desc_text = _clean_pdf_text(opt.description)
                     story.append(Paragraph(
                         f"{opt.label}. {opt.name}<br/>"
@@ -456,8 +675,8 @@ def export_pdf(sess: Session, path: str, ai_fallback: str = "") -> str:
         else:
             story.append(Paragraph("未发现明显异常，主要指标处于行业合理区间。", body))
 
-        # 三、第二稿
-        story.append(Paragraph("三、第二稿（互动决策与增值测算）", h1))
+        # 六、第二稿
+        story.append(Paragraph("六、第二稿（互动决策与增值测算）", h1))
         if sess.draft2:
             t2_data = [["发现", "选项", "当前值", "目标值", "变动幅度", "净影响"]]
             for e in sess.draft2:
@@ -485,37 +704,46 @@ def export_pdf(sess: Session, path: str, ai_fallback: str = "") -> str:
             for e in sess.draft2:
                 story.append(Paragraph(e.finding_title, h2))
                 story.append(Paragraph(f"选项：{e.option_label}. {e.option_name}", body))
-                story.append(Paragraph(f"趋势（环比同比）：{e.trend}", body))
+                story.append(Paragraph(f"趋势（环比同比）：{_clean_pdf_text(e.trend)}", body))
                 story.append(Paragraph(f"操作细节：{_clean_pdf_text(e.action_detail)}", body))
                 story.append(Paragraph(f"注意事项：{_clean_pdf_text(e.cautions)}", body))
         else:
-            story.append(Paragraph("无决策记录。", body))
+            story.append(Paragraph("无决策记录。完成互动问答后将展示决策明细。", body))
 
-        # 四、完整方案
-        story.append(Paragraph("四、完整方案与净影响汇总", h1))
+        # 七、将来
+        story.append(Paragraph("七、将来要做什么（落地清单）", h1))
+        if narr.decision_summaries:
+            story.append(Paragraph("互动决策摘要", h2))
+            for s in narr.decision_summaries:
+                story.append(Paragraph(f"* {_clean_pdf_text(s)}", body))
         story.append(Paragraph(f"总净影响：{_fmt_money(sess.total_est_saving)}", body))
         story.append(Paragraph(f"落地性评分：{sess.feasibility_score:.2f}%", body))
         if sess.feasibility_breakdown:
             story.append(Paragraph("扣分明细：", body))
             for b in sess.feasibility_breakdown:
-                story.append(Paragraph(f"- {b}", body))
-        story.append(Paragraph(f"状态：{sess.state}", body))
+                story.append(Paragraph(f"- {_clean_pdf_text(b)}", body))
+        for i, a in enumerate(narr.future_actions, 1):
+            story.append(Paragraph(f"{i}. {_clean_pdf_text(a)}", body))
+        story.append(Paragraph("建议老板每月盯住这些数", h2))
+        for k in narr.monthly_kpis:
+            story.append(Paragraph(f"* {_clean_pdf_text(k)}", body))
         if sess.strategy_notes:
             story.append(Paragraph("战略意图记录", h2))
             for n in sess.strategy_notes:
-                story.append(Paragraph(f"- {n}", body))
+                story.append(Paragraph(f"- {_clean_pdf_text(n)}", body))
 
-        # 五、合规声明
-        story.append(Paragraph("五、合规声明", h1))
+        # 八、合规
+        story.append(Paragraph("八、合规声明", h1))
         story.append(Paragraph(COMPLIANCE_NOTE, ParagraphStyle("Bold", parent=body, fontName=cjk_font, textColor=colors.HexColor("#b91c1c"))))
         story.append(Paragraph(
-            "本工具所有优化建议均属于合法税务筹划范畴，包括但不限于：研发费用加计扣除、"
-            "小微企业优惠、高新技术企业优惠、限额内费用据实扣除、业务模式优化等。",
+            "本工具所有优化建议均属于合法税务筹划与经营管理建议范畴，包括但不限于：研发费用加计扣除、"
+            "小微企业优惠、高新技术企业优惠、限额内费用据实扣除、业务模式与回款优化等。"
+            "不构成投资、融资或法律意见，不替代审计报告。",
             body,
         ))
 
-        # 六、增值税估算口径说明
-        story.append(Paragraph("六、增值税税负率估算口径说明", h1))
+        # 九、口径
+        story.append(Paragraph("九、增值税税负率估算口径说明", h1))
         story.append(Paragraph(
             "本报告所列增值税税负率为估算值，非真实应纳税额。"
             "估算公式：估算增值税 = 税金及附加 ÷ 12%（增值税附加税费占增值税比例的经验值），"

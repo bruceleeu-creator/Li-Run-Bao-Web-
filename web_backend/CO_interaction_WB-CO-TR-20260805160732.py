@@ -293,6 +293,48 @@ def _try_ai_enhance_draft2(sess: iv_mod.Session) -> None:
         logger.info("互动 AI 增强失败（%s），保持规则文本", type(e).__name__)
 
 
+def _decision_brief(sess: iv_mod.Session) -> list[dict]:
+    return [
+        {
+            "finding_id": d.finding_id,
+            "finding_title": d.finding_title,
+            "option_label": d.option_label,
+            "option_name": d.option_name,
+        }
+        for d in sess.decisions
+    ]
+
+
+def _try_ai_enrich_current_question(sess: iv_mod.Session) -> None:
+    """对当前互动题做 DeepSeek 出题优化（题面 + A/B/C）；失败静默保留原题。"""
+    current = sess.current_finding
+    if current is None:
+        return
+    engine = ai_mod._engine(timeout=60.0)
+    if engine is None or not engine.is_available():
+        return
+    try:
+        engine.enrich_interaction_question(
+            current,
+            data=sess.data,
+            prior_decisions=_decision_brief(sess),
+            strategy_notes=list(sess.strategy_notes),
+        )
+        # 同步回 diagnosis 中的同一 finding，保证后续 draft2 读到优化后的选项
+        for i, f in enumerate(sess.diagnosis.findings):
+            if f.id == current.id:
+                sess.diagnosis.findings[i] = current
+                break
+        if not sess.ai_fallback_message:
+            sess.ai_fallback_message = "DeepSeek 已优化当前互动题与 A/B/C 选项。"
+    except Exception as e:
+        logger.info("互动出题 AI 优化失败（%s），保留原题：%s", type(e).__name__, current.id)
+        if not sess.ai_fallback_message:
+            sess.ai_fallback_message = (
+                f"DeepSeek 出题优化未生效（{type(e).__name__}），已使用诊断阶段选项。"
+            )
+
+
 # ── 端点 ──────────────────────────────────────────────────────────────
 
 @router.post("/start")
@@ -313,7 +355,7 @@ def start_interaction() -> dict:
             _restore_session(data)
         if _sess is not None:
             return _state_payload()
-        # 无诊断：自动执行诊断（规则 + AI 增强）
+        # 无诊断：自动执行诊断（规则 + DeepSeek 补充发现与出题）
         diag_mod_route = importlib.import_module("web_backend.CO_diagnosis_WB-CO-TR-20260805160732")
         diag_mod_route._run_diagnosis(ai=True)
         diagnosis = _diagnosis_from_db(data)
@@ -321,6 +363,9 @@ def start_interaction() -> dict:
             raise HTTPException(status_code=500, detail="诊断结果不可用，请稍后重试")
         _sess = iv_mod.start_session(data, diagnosis)
         _sess_session_version = session.get_version()
+        # 首题再做一轮出题优化（结合企业上下文）
+        if _sess.state == iv_mod.STATE_FINDING_LOOP:
+            _try_ai_enrich_current_question(_sess)
         _persist(_sess)
         return _state_payload()
 
@@ -367,6 +412,9 @@ def submit_decision(body: DecideIn) -> dict:
         )
         if decision is None:
             raise HTTPException(status_code=400, detail="决策无效：选项不存在或状态不允许")
+        # 进入下一题：结合已选战略意图优化出题
+        if sess.state == iv_mod.STATE_FINDING_LOOP and sess.current_finding is not None:
+            _try_ai_enrich_current_question(sess)
         # 全部处理完进入 DRAFT2 → CONFIRMATION；尝试 AI 增强第二稿
         if sess.state == iv_mod.STATE_CONFIRMATION:
             _try_ai_enhance_draft2(sess)
@@ -382,3 +430,164 @@ def confirm_interaction(body: ConfirmIn) -> dict:
         state = iv_mod.confirm(sess, user_confirmed=body.user_confirmed)
         _persist(sess)
         return _state_payload()
+
+
+class FastForwardIn(BaseModel):
+    """一键补全互动：默认选 A，跳过 AI 出题增强（快路径）。"""
+    option_label: str = "A"
+    strategy_note: str = "一键补全（沿用已有诊断，快速解锁导出）"
+    confirm: bool = True
+
+
+@router.post("/fast-forward")
+def fast_forward_interaction(body: FastForwardIn = FastForwardIn()) -> dict:
+    """一键走完剩余 A/B/C 并确认，解锁导出。
+
+    适用：会话+诊断已在，互动被清空/未做完；旧实例升级后快速恢复导出能力，
+    无需重新导入与重新诊断。跳过 DeepSeek 出题增强，保证秒级完成。
+    """
+    global _sess, _sess_session_version
+    data = session.get_data()
+    if data is None:
+        raise HTTPException(status_code=400, detail="尚未导入财报，请先完成财报导入")
+
+    label = (body.option_label or "A").strip().upper()
+    if label not in ("A", "B", "C"):
+        label = "A"
+
+    with _lock:
+        # 丢弃无效内存会话，强制按 DB 诊断重建
+        if _sess is not None and not (
+            _sess_session_version == session.get_version() and _db_has_live_session()
+        ):
+            _sess = None
+            _sess_session_version = ""
+
+        diagnosis = _diagnosis_from_db(data)
+        if diagnosis is None:
+            # 无持久化诊断：即时规则诊断并保存（仍比完整 AI 诊断快）
+            result = diag_mod.diagnose(data)
+            findings_payload = []
+            for f in result.findings:
+                findings_payload.append({
+                    "id": f.id,
+                    "title": f.title,
+                    "category": f.category,
+                    "severity": f.severity,
+                    "fact": f.fact,
+                    "benchmark": f.benchmark,
+                    "suggestion": f.suggestion,
+                    "current_value": f.current_value,
+                    "target_value": f.target_value,
+                    "unit": f.unit,
+                    "status": f.status,
+                    "ai_enhanced": False,
+                    "source": "rule",
+                    "options": [
+                        {
+                            "label": o.label,
+                            "name": o.name,
+                            "description": o.description,
+                            "target_value": o.target_value,
+                            "tax_rate": o.tax_rate,
+                            "est_saving": o.est_saving,
+                            "cost_saving": o.cost_saving,
+                            "tax_saving": o.tax_saving,
+                            "tax_impact": o.tax_impact,
+                            "feasibility": o.feasibility,
+                            "risk_level": o.risk_level,
+                            "action_note": o.action_note,
+                            "deduction_rate": getattr(o, "deduction_rate", 0.0),
+                        }
+                        for o in f.options
+                    ],
+                })
+            db.save_diagnosis(
+                session_version=session.get_version(),
+                company_name=result.company_name,
+                industry=result.industry,
+                industry_fallback=result.industry_fallback,
+                vat_estimate_note=result.vat_estimate_note,
+                ai_used=False,
+                findings=findings_payload,
+            )
+            diagnosis = result
+
+        if not diagnosis.findings:
+            # 无发现也可直接解锁：空决策 + 确认
+            sess = iv_mod.start_session(data, diagnosis)
+            if sess.state == iv_mod.STATE_CONFIRMATION or sess.state == iv_mod.STATE_DRAFT2:
+                iv_mod.confirm(sess, user_confirmed=True)
+            _sess = sess
+            _sess_session_version = session.get_version()
+            _persist(sess)
+            payload = _state_payload()
+            payload["fast_forward"] = True
+            payload["auto_decisions"] = 0
+            return payload
+
+        # 有内存会话且已解锁：直接返回
+        sess = _ensure_session(data)
+        if sess is None:
+            sess = iv_mod.start_session(data, diagnosis)
+            _sess = sess
+            _sess_session_version = session.get_version()
+
+        if sess.is_export_unlocked:
+            payload = _state_payload()
+            payload["fast_forward"] = True
+            payload["auto_decisions"] = 0
+            payload["already_unlocked"] = True
+            return payload
+
+        # 若状态不在 FINDING_LOOP（如 IDLE），重建
+        if sess.state not in (
+            iv_mod.STATE_FINDING_LOOP,
+            iv_mod.STATE_DRAFT2,
+            iv_mod.STATE_CONFIRMATION,
+        ):
+            sess = iv_mod.start_session(data, diagnosis)
+            _sess = sess
+            _sess_session_version = session.get_version()
+
+        auto_count = 0
+        guard = 0
+        while sess.state == iv_mod.STATE_FINDING_LOOP and sess.current_finding is not None:
+            guard += 1
+            if guard > 200:
+                raise HTTPException(status_code=500, detail="一键补全循环异常，请刷新后重试")
+            current = sess.current_finding
+            # 若指定选项不存在则回退 A
+            opt = next((o for o in current.options if o.label == label), None)
+            use_label = label if opt else "A"
+            if not any(o.label == use_label for o in current.options):
+                use_label = current.options[0].label if current.options else "A"
+            decision = iv_mod.submit_decision(
+                sess,
+                current.id,
+                use_label,
+                strategy_note=body.strategy_note,
+            )
+            if decision is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"无法自动决策：{current.id} / {use_label}",
+                )
+            auto_count += 1
+            # 不调用 AI 出题增强
+
+        if body.confirm and sess.state in (iv_mod.STATE_CONFIRMATION, iv_mod.STATE_DRAFT2):
+            # DRAFT2 会自动进 CONFIRMATION；若停在 DRAFT2 再推一下
+            if sess.state == iv_mod.STATE_DRAFT2:
+                # interactive 中 _generate_draft2 会设 CONFIRMATION；保险处理
+                sess.state = iv_mod.STATE_CONFIRMATION
+            iv_mod.confirm(sess, user_confirmed=True)
+
+        _sess = sess
+        _sess_session_version = session.get_version()
+        _persist(sess)
+        payload = _state_payload()
+        payload["fast_forward"] = True
+        payload["auto_decisions"] = auto_count
+        payload["already_unlocked"] = False
+        return payload

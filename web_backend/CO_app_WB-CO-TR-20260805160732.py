@@ -13,6 +13,7 @@ _ai_module = importlib.import_module("web_backend.CO_ai_route_WB-CO-TR-202608051
 _budget_module = importlib.import_module("web_backend.CO_budget_WB-CO-TR-20260805160732")
 _diagnosis_module = importlib.import_module("web_backend.CO_diagnosis_WB-CO-TR-20260805160732")
 _interaction_module = importlib.import_module("web_backend.CO_interaction_WB-CO-TR-20260805160732")
+_export_module = importlib.import_module("web_backend.CO_export_WB-CO-TR-20260810")
 
 
 def create_app() -> FastAPI:
@@ -23,6 +24,7 @@ def create_app() -> FastAPI:
     app.include_router(_budget_module.router)
     app.include_router(_diagnosis_module.router)
     app.include_router(_interaction_module.router)
+    app.include_router(_export_module.router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -1321,6 +1322,180 @@ def validate_final_report(markdown: str, expected: dict) -> list[str]:
     return errors
 
 
+def _fmt_metric_cell(value: Any, metric: str = "") -> str:
+    """把确定性数值格式化为表内单元格，缺失写「未识别」。"""
+    if value is None:
+        return "未识别"
+    number = _number_from_cell(value)
+    if number is None:
+        text = str(value).strip()
+        return text if text else "未识别"
+    if "率" in metric or "margin" in metric.lower():
+        return f"{number:.2f}%"
+    # 金额保留两位，千分位
+    return f"{number:,.2f}"
+
+
+def _build_scope_section(expected: dict) -> str:
+    coverage = expected.get("page_coverage") or {}
+    lines = ["## 数据范围与完整性", "", "| 文件 | 页覆盖 |", "| --- | --- |"]
+    if not coverage:
+        lines.append("| 无页覆盖元数据 | — |")
+    else:
+        for name, values in coverage.items():
+            if isinstance(values, (list, tuple)) and len(values) == 2:
+                lines.append(f"| {name} | {values[0]}/{values[1]} 页 |")
+            else:
+                lines.append(f"| {name} | 未识别 |")
+    return "\n".join(lines)
+
+
+def _build_metrics_table_section(expected: dict, years: list[int]) -> str:
+    """用 required_metrics 拼装可通过校验的关键指标表。"""
+    raw = expected.get("required_metrics") or {}
+    # year -> metric -> value
+    by_year: dict[str, dict[str, Any]] = {}
+    metrics_order: list[str] = []
+    if isinstance(raw, dict) and raw and all(re.fullmatch(r"\d{4}", str(k)) for k in raw):
+        for year, metrics in raw.items():
+            if not isinstance(metrics, dict):
+                continue
+            by_year[str(year)] = dict(metrics)
+            for metric in metrics:
+                if metric not in metrics_order:
+                    metrics_order.append(str(metric))
+    elif isinstance(raw, dict):
+        # metric -> year -> value
+        for metric, years_map in raw.items():
+            metrics_order.append(str(metric))
+            if isinstance(years_map, dict):
+                for year, value in years_map.items():
+                    by_year.setdefault(str(year), {})[str(metric)] = value
+
+    year_cols = [str(y) for y in years] if years else sorted(by_year.keys())
+    if not metrics_order:
+        metrics_order = ["营业收入", "毛利率", "净利率", "增值税税负率", "所得税税负率"]
+    header = "| 指标 | " + " | ".join(year_cols) + " |"
+    sep = "| --- | " + " | ".join("---" for _ in year_cols) + " |"
+    rows = [header, sep]
+    for metric in metrics_order:
+        cells = [_fmt_metric_cell((by_year.get(y) or {}).get(metric), metric) for y in year_cols]
+        # 校验要求每个单元格非空
+        cells = [c if c.strip() else "未识别" for c in cells]
+        rows.append("| " + metric + " | " + " | ".join(cells) + " |")
+    return "## 跨年关键指标\n\n" + "\n".join(rows)
+
+
+def _build_conflicts_section(expected: dict) -> str:
+    conflicts = expected.get("conflicts") or []
+    lines = ["## 数据冲突与待核验项", ""]
+    if not conflicts:
+        lines.append("无")
+        return "\n".join(lines)
+    for index, conflict in enumerate(conflicts, start=1):
+        if not isinstance(conflict, dict):
+            lines.append(f"{index}. 冲突项待核验")
+            continue
+        metric = str(conflict.get("metric") or f"冲突{index}").strip()
+        lines.append(f"### {metric}")
+        sides = conflict.get("sides") if isinstance(conflict.get("sides"), list) else []
+        if len(sides) < 2:
+            # 兼容旧结构
+            sides = [
+                {
+                    "source_file": conflict.get("existing_source_file") or conflict.get("source_file") or "",
+                    "value": conflict.get("existing_ai_value", conflict.get("ai_value")),
+                    "evidence": [],
+                },
+                {
+                    "source_file": conflict.get("source_file") or "merge_years_deterministic",
+                    "value": conflict.get("ai_value", conflict.get("deterministic_value")),
+                    "evidence": [],
+                },
+            ]
+        for side in sides:
+            if not isinstance(side, dict):
+                continue
+            source_file = str(side.get("source_file") or "未知来源").strip() or "未知来源"
+            value = side.get("value")
+            if value is None:
+                value_text = "未识别"
+            else:
+                try:
+                    number = float(value)
+                    value_text = f"{number:g}"
+                except (TypeError, ValueError):
+                    value_text = str(value)
+            page_bits: list[str] = []
+            for evidence in side.get("evidence") or []:
+                if not isinstance(evidence, dict):
+                    continue
+                for page in evidence.get("pages") or []:
+                    try:
+                        page_bits.append(f"第 {int(page)} 页")
+                    except (TypeError, ValueError):
+                        continue
+            page_text = "、".join(page_bits) if page_bits else "第 1 页"
+            lines.append(f"- {source_file}：{value_text}（{page_text}）")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _extract_section_body(markdown: str, heading: str) -> str:
+    body = _markdown_section(markdown, heading).strip()
+    return body
+
+
+def harden_final_report(
+    markdown: str,
+    expected: dict,
+    *,
+    deterministic_markdown: str = "",
+) -> str:
+    """将 AI 草稿硬化为可通过 validate_final_report 的结构。
+
+    - 强制标题、章节、页覆盖、关键指标表、增值税口径
+    - 保留 AI 的「趋势与异常」「审计意见与重大事项」正文（若有）
+    - 冲突区按 expected.conflicts 结构化重写，避免呈现不完整
+    """
+    company_name = str(expected.get("company_name") or "企业").strip()
+    years = sorted({int(y) for y in expected.get("years") or []})
+    if years:
+        title = f"# {company_name} {years[0]}—{years[-1]} 跨年合并报告"
+    else:
+        title = f"# {company_name} 跨年合并报告"
+
+    trend_body = _extract_section_body(markdown, "## 趋势与异常") or "详见跨年关键指标与审计意见。"
+    audit_body = _extract_section_body(markdown, "## 审计意见与重大事项") or "未识别独立审计意见摘录。"
+    # 若 AI 草稿几乎为空，尝试从确定性 markdown 补一句
+    if not trend_body.strip() and deterministic_markdown:
+        trend_body = "指标来源于已导入结构化财报的确定性计算，详见关键指标表。"
+
+    parts = [
+        title,
+        "",
+        _build_scope_section(expected),
+        "",
+        _build_metrics_table_section(expected, years),
+        "",
+        "## 趋势与异常",
+        "",
+        trend_body.strip(),
+        "",
+        "## 审计意见与重大事项",
+        "",
+        audit_body.strip(),
+        "",
+        _build_conflicts_section(expected),
+        "",
+        "## 计算口径与合规声明",
+        "",
+        f"{_VAT_ESTIMATE_WORDING}。本报告仅用于合法合规的经营分析，不构成投资、融资或法律意见。",
+        "",
+    ]
+    return "\n".join(parts).rstrip() + "\n"
+
+
 # 预算模板顶部需要识别的指标键
 _BUDGET_INDICATOR_KEYS = ("budget_revenue", "budget_cost", "last_year_revenue", "last_year_cost")
 
@@ -1343,39 +1518,253 @@ def _parse_budget_json(content: str) -> dict:
     return obj
 
 
-def extract_budget_indicators(ocr_text: str) -> tuple[dict, str]:
-    """从审计报告 OCR 原文识别预算模板顶部指标。
+def _chunk_ocr_for_budget(ocr_text: str, chunk_size: int = 12_000, max_chunks: int = 6) -> list[str]:
+    """按长度切分 OCR，优先保留含利润表/费用关键词的片段。"""
+    text = (ocr_text or "").strip()
+    if not text:
+        return []
+    if len(text) <= chunk_size:
+        return [text]
+    keywords = (
+        "利润表", "营业收入", "营业成本", "销售费用", "管理费用", "研发费用",
+        "财务费用", "业务招待", "职工福利", "教育经费", "广告", "咨询", "折旧",
+    )
+    windows: list[tuple[int, str]] = []
+    step = chunk_size - 800
+    for i in range(0, len(text), max(step, 1)):
+        chunk = text[i:i + chunk_size]
+        if not chunk.strip():
+            continue
+        score = sum(1 for k in keywords if k in chunk)
+        windows.append((score, chunk))
+    windows.sort(key=lambda x: x[0], reverse=True)
+    # 高分片段优先，再补全文头尾
+    picked = [c for _, c in windows[:max_chunks]]
+    if text[:chunk_size] not in picked:
+        picked.insert(0, text[:chunk_size])
+    if text[-chunk_size:] not in picked and len(text) > chunk_size:
+        picked.append(text[-chunk_size:])
+    # 去重保序
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in picked:
+        key = c[:200]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+        if len(out) >= max_chunks:
+            break
+    return out
+
+
+def _merge_numeric_dicts(base: dict, extra: dict, keys: tuple[str, ...]) -> dict:
+    """字段取「较大的正数优先」，避免 0 覆盖已识别金额。"""
+    out = dict(base)
+    for key in keys:
+        try:
+            b = float(out.get(key) or 0)
+        except (TypeError, ValueError):
+            b = 0.0
+        try:
+            e = float(extra.get(key) or 0)
+        except (TypeError, ValueError):
+            e = 0.0
+        # 优先非零；若都非零取绝对值更大（通常本年累计 > 局部）
+        if e > 0 and (b <= 0 or e >= b * 0.5):
+            # 若 e 明显大于 b 或 b 为空，采用 e；防止小片段局部数覆盖全年
+            if b <= 0 or e > b:
+                out[key] = round(e, 2)
+        elif b <= 0 and e > 0:
+            out[key] = round(e, 2)
+        else:
+            out[key] = round(b, 2)
+    return out
+
+
+def extract_budget_indicators(
+    ocr_text: str,
+    *,
+    structured_hints: dict | None = None,
+) -> tuple[dict, str]:
+    """从审计报告 OCR 原文识别预算模板顶部指标（多片段聚合）。
 
     识别 4 个字段（营业收入/营业成本 × 本年累计/上年累计），返回 JSON dict：
         {"budget_revenue": number, "budget_cost": number,
          "last_year_revenue": number, "last_year_cost": number}
+    structured_hints：可选结构化先验（来自 FinancialData），用于补洞/校验。
     返回 (indicators, error)。未配置/失败时 error 非空，indicators 为空 dict。
     """
-    if not ocr_text.strip():
+    if not ocr_text.strip() and not structured_hints:
         return {}, "无审计报告 OCR 文本，无法识别"
-    engine = _engine(timeout=60.0)  # OCR 文本较长，识别需更长时间
+    engine = _engine(timeout=90.0)
     if engine is None:
+        # 无 AI 时直接返回结构化先验
+        if structured_hints:
+            out = {k: round(float(structured_hints.get(k) or 0), 2) for k in _BUDGET_INDICATOR_KEYS}
+            return out, ""
         return {}, "大模型未配置。请先在设置中配置 AI（仅需一次）。"
+
     system_prompt = (
-        "你是企业财报数据提取助手。根据用户提供的审计报告 OCR 提取文本，识别利润表中的关键指标。"
-        "只需返回一个 JSON 对象，包含："
-        '{"budget_revenue": 本年累计营业收入, "budget_cost": 本年累计营业成本,'
-        ' "last_year_revenue": 上年累计营业收入, "last_year_cost": 上年累计营业成本}。'
-        "金额单位为元，返回数字（不要千分位逗号、不要货币符号）。"
-        "若某项识别不到，填 0。只返回 JSON，不要其他文字。"
-        "禁止虚构数据；识别不到就填 0。"
+        "你是企业财报数据提取助手。根据用户提供的审计报告 OCR 文本，识别利润表关键指标。"
+        "只返回一个 JSON 对象，字段："
+        '{"budget_revenue": 最新年/本年累计营业收入, "budget_cost": 最新年/本年累计营业成本,'
+        ' "last_year_revenue": 上年累计营业收入, "last_year_cost": 上年累计营业成本,'
+        ' "selling_expense": 最新年销售费用, "admin_expense": 最新年管理费用,'
+        ' "rd_expense": 最新年研发费用, "finance_expense": 最新年财务费用,'
+        ' "prev_selling_expense": 上年销售费用, "prev_admin_expense": 上年管理费用,'
+        ' "prev_rd_expense": 上年研发费用, "prev_finance_expense": 上年财务费用}。'
+        "金额单位为元，返回纯数字（不要千分位、货币符号、汉字单位）。"
+        "优先取合并利润表「本年累计/期末」；上年取「上年累计/期初」。"
+        "识别不到的字段填 0。只返回 JSON。禁止虚构。"
     )
-    try:
-        content = engine.chat(ocr_text[:6000], system_prompt=system_prompt, max_tokens=4_096)
-        obj = _parse_budget_json(content)
-        # 只取 4 个目标键，缺失填 0
-        out: dict = {}
-        for key in _BUDGET_INDICATOR_KEYS:
-            val = obj.get(key)
+    hints = ""
+    if structured_hints:
+        hints = "\n【结构化先验（可参考，OCR 更准时以 OCR 为准）】\n" + json.dumps(
+            structured_hints, ensure_ascii=False
+        )
+
+    merged: dict = {k: 0.0 for k in _BUDGET_INDICATOR_KEYS}
+    extra_keys = (
+        "selling_expense", "admin_expense", "rd_expense", "finance_expense",
+        "prev_selling_expense", "prev_admin_expense", "prev_rd_expense", "prev_finance_expense",
+    )
+    for k in extra_keys:
+        merged[k] = 0.0
+
+    chunks = _chunk_ocr_for_budget(ocr_text) if ocr_text.strip() else []
+    if not chunks and structured_hints:
+        for k in _BUDGET_INDICATOR_KEYS:
+            merged[k] = round(float(structured_hints.get(k) or 0), 2)
+        return {k: merged[k] for k in _BUDGET_INDICATOR_KEYS}, ""
+
+    errors: list[str] = []
+    for idx, chunk in enumerate(chunks):
+        try:
+            content = engine.chat(
+                f"【片段 {idx + 1}/{len(chunks)}】\n{chunk}{hints if idx == 0 else ''}",
+                system_prompt=system_prompt,
+                max_tokens=2_048,
+            )
+            obj = _parse_budget_json(content)
+            merged = _merge_numeric_dicts(merged, obj, _BUDGET_INDICATOR_KEYS + extra_keys)
+        except AIEngineError as e:
+            errors.append(str(e))
+        except Exception as e:
+            errors.append(type(e).__name__)
+
+    # 结构化补洞：OCR 仍为 0 时用先验
+    if structured_hints:
+        for k in _BUDGET_INDICATOR_KEYS:
+            if float(merged.get(k) or 0) <= 0 and float(structured_hints.get(k) or 0) > 0:
+                merged[k] = round(float(structured_hints[k]), 2)
+
+    if all(float(merged.get(k) or 0) <= 0 for k in _BUDGET_INDICATOR_KEYS):
+        return {}, ("；".join(errors) if errors else "未能识别到营业收入/成本")
+
+    # 主返回仍是 4 键；期间费用放 _period 供导出填充
+    out = {k: round(float(merged.get(k) or 0), 2) for k in _BUDGET_INDICATOR_KEYS}
+    out["_period"] = {k: round(float(merged.get(k) or 0), 2) for k in extra_keys}
+    return out, ""
+
+
+def extract_budget_expense_lines(
+    ocr_text: str,
+    catalog: list[dict],
+    *,
+    structured_facts: dict | None = None,
+    period_totals: dict | None = None,
+) -> tuple[list[dict], str]:
+    """多段 DeepSeek：把费用明细分配到模板行。
+
+    catalog: [{row, subject, expense_name, invoice_name}, ...]
+    返回 (lines, error)。lines 项含 row/last_year_actual/budget_amount/actual_amount。
+    """
+    engine = _engine(timeout=120.0)
+    if engine is None:
+        return [], "大模型未配置"
+    if not catalog:
+        return [], "模板行目录为空"
+
+    # 按科目分批，降低漏项
+    by_subject: dict[str, list[dict]] = {}
+    for row in catalog:
+        by_subject.setdefault(str(row.get("subject") or "其他"), []).append(row)
+
+    system = (
+        "你是中国企业费用预算编制助手。根据 OCR 与结构化事实，把费用金额分配到给定模板行。"
+        "只返回 JSON：{\"lines\":[{\"row\":14,\"last_year_actual\":0,\"budget_amount\":0,"
+        "\"actual_amount\":0,\"reason\":\"...\"}]}。"
+        "规则：1) row 必须来自用户给的目录；2) 金额单位元、纯数字；"
+        "3) last_year_actual=上年发生；actual_amount=最新年已发生；"
+        "budget_amount 默认可取上年或最新年×合理比例；"
+        "4) 同一科目下各行 actual 合计尽量接近期间费用合计；"
+        "5) 识别不到的行不要返回；禁止虚构合同/虚开发票等违法表述；只输出 JSON。"
+    )
+    all_lines: list[dict] = []
+    chunks = _chunk_ocr_for_budget(ocr_text, chunk_size=10_000, max_chunks=5) if ocr_text else [""]
+    facts_json = json.dumps(
+        {"structured": structured_facts or {}, "period_totals": period_totals or {}},
+        ensure_ascii=False,
+    )
+
+    for subject, rows in by_subject.items():
+        # 每科目最多 2 次调用（目录 + 高分 OCR 片段）
+        cat_json = json.dumps(rows, ensure_ascii=False)
+        user = (
+            f"科目大类：{subject}\n模板行目录：{cat_json}\n"
+            f"结构化事实：{facts_json}\n"
+            f"OCR：\n{(chunks[0] if chunks else '')[:9000]}"
+        )
+        try:
+            content = engine.chat(user, system_prompt=system, max_tokens=4_096)
+            obj = _parse_budget_json(content)
+            items = obj.get("lines") if isinstance(obj, dict) else None
+            if isinstance(items, list):
+                for it in items:
+                    if isinstance(it, dict) and it.get("row") is not None:
+                        all_lines.append(it)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.info("科目 %s 费用分配失败：%s", subject, type(e).__name__)
+            continue
+
+        # 第二遍：用另一 OCR 片段补漏
+        if len(chunks) > 1:
+            user2 = (
+                f"科目大类：{subject}（补漏）\n模板行：{cat_json}\n"
+                f"已有分配行号：{[x.get('row') for x in all_lines[-30:]]}\n"
+                f"OCR补片段：\n{chunks[1][:9000]}\n请只返回尚未覆盖且能从文本识别到的行。"
+            )
             try:
-                out[key] = round(float(val), 2) if val else 0.0
+                content2 = engine.chat(user2, system_prompt=system, max_tokens=3_072)
+                obj2 = _parse_budget_json(content2)
+                items2 = obj2.get("lines") if isinstance(obj2, dict) else None
+                if isinstance(items2, list):
+                    for it in items2:
+                        if isinstance(it, dict) and it.get("row") is not None:
+                            all_lines.append(it)
+            except Exception:
+                pass
+
+    if not all_lines:
+        return [], "未能从 OCR 分配到费用行"
+    # 同行合并：取较大值
+    merged_by_row: dict[int, dict] = {}
+    for it in all_lines:
+        try:
+            row = int(it.get("row"))
+        except (TypeError, ValueError):
+            continue
+        cur = merged_by_row.setdefault(
+            row,
+            {"row": row, "last_year_actual": 0.0, "budget_amount": 0.0, "actual_amount": 0.0},
+        )
+        for key in ("last_year_actual", "budget_amount", "actual_amount"):
+            try:
+                val = float(it.get(key) or 0)
             except (TypeError, ValueError):
-                out[key] = 0.0
-        return out, ""
-    except AIEngineError as e:
-        return {}, str(e)
+                val = 0.0
+            if val > float(cur.get(key) or 0):
+                cur[key] = round(val, 2)
+    return list(merged_by_row.values()), ""

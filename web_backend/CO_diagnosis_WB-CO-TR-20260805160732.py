@@ -45,7 +45,7 @@ def _option_to_dict(opt) -> dict:
     }
 
 
-def _finding_to_dict(finding, ai_enhanced: bool = False) -> dict:
+def _finding_to_dict(finding, ai_enhanced: bool = False, source: str = "rule") -> dict:
     return {
         "id": finding.id,
         "title": finding.title,
@@ -59,22 +59,42 @@ def _finding_to_dict(finding, ai_enhanced: bool = False) -> dict:
         "unit": finding.unit,
         "status": finding.status,
         "ai_enhanced": ai_enhanced,
+        "source": source,  # rule | ai | rule+ai
         "options": [_option_to_dict(o) for o in finding.options],
     }
 
 
-def _diagnosis_payload(result, ai_used: bool, enhanced_ids: set | None = None) -> dict:
+def _diagnosis_payload(
+    result,
+    ai_used: bool,
+    enhanced_ids: set | None = None,
+    ai_only_ids: set | None = None,
+    ai_discover_count: int = 0,
+    ai_message: str = "",
+) -> dict:
     enhanced_ids = enhanced_ids or set()
+    ai_only_ids = ai_only_ids or set()
+    findings_out = []
+    for f in result.findings:
+        if f.id in ai_only_ids:
+            source = "ai"
+        elif f.id in enhanced_ids:
+            source = "rule+ai"
+        else:
+            source = "rule"
+        findings_out.append(
+            _finding_to_dict(f, ai_enhanced=f.id in enhanced_ids or f.id in ai_only_ids, source=source)
+        )
     return {
         "company_name": result.company_name,
         "industry": result.industry,
         "industry_fallback": result.industry_fallback,
         "vat_estimate_note": result.vat_estimate_note,
         "ai_used": ai_used,
+        "ai_discover_count": ai_discover_count,
+        "ai_message": ai_message,
         "years": list(result.years),
-        "findings": [
-            _finding_to_dict(f, ai_enhanced=f.id in enhanced_ids) for f in result.findings
-        ],
+        "findings": findings_out,
     }
 
 
@@ -87,31 +107,88 @@ def _require_data():
 
 
 def _run_diagnosis(ai: bool = True) -> dict:
-    """执行规则诊断；AI 可用且 ai=True 时逐条增强 A/B/C 选项（失败回退规则）。"""
+    """执行规则诊断；AI 可用时：①DeepSeek 补充发现问题 ②逐条优化 A/B/C 出题。
+
+    任一 AI 步骤失败静默回退规则结果，不阻塞主流程。
+    """
     data = _require_data()
     result = diag_mod.diagnose(data)
     ai_used = False
     enhanced_ids: set[str] = set()
+    ai_only_ids: set[str] = set()
+    ai_discover_count = 0
+    ai_messages: list[str] = []
 
     engine = None
     if ai:
-        engine = ai_mod._engine(timeout=30.0)
+        # 发现 + 出题可能较慢：给足超时（仍低于前端默认长时间挂起）
+        engine = ai_mod._engine(timeout=90.0)
 
     if engine is not None and engine.is_available():
         ai_used = True
+        ocr_texts = []
+        try:
+            ocr_texts = list(session.get_ocr_texts() or [])
+        except Exception:
+            ocr_texts = []
+
+        # ① DeepSeek 补充发现（规则未覆盖的经营/税负/回款等问题）
+        try:
+            extra = engine.discover_findings(
+                data, existing=result.findings, ocr_texts=ocr_texts, max_new=10
+            )
+            for f in extra:
+                if f.id in {x.id for x in result.findings}:
+                    continue
+                result.findings.append(f)
+                ai_only_ids.add(f.id)
+            ai_discover_count = len(ai_only_ids)
+            if ai_discover_count:
+                ai_messages.append(f"DeepSeek 补充发现 {ai_discover_count} 条")
+            else:
+                ai_messages.append("DeepSeek 已研判，无新增独立发现（可能与规则重叠）")
+        except Exception as e:
+            logger.info("诊断 AI 补充发现失败（%s），仅保留规则发现", type(e).__name__)
+            ai_messages.append(f"DeepSeek 补充发现失败，已回退规则：{type(e).__name__}")
+
+        # 严重度排序：高 → 中 → 低
+        rank = {"高": 0, "中": 1, "低": 2}
+        result.findings.sort(key=lambda x: rank.get(x.severity, 9))
+
+        # ② 逐条优化 A/B/C 互动选项（带企业数据上下文）
         for finding in result.findings:
             try:
-                options = engine.generate_options(finding)
+                options = engine.generate_options(
+                    finding, data=data, ocr_texts=ocr_texts
+                )
                 if options and len(options) == 3:
                     finding.options = options
                     enhanced_ids.add(finding.id)
             except Exception as e:
-                # 单条增强失败：保留规则选项，不阻塞整体诊断
                 logger.info(
-                    "诊断 AI 增强失败（%s），保留规则选项：%s", type(e).__name__, finding.id
+                    "诊断 AI 出题增强失败（%s），保留原选项：%s",
+                    type(e).__name__,
+                    finding.id,
                 )
+        if enhanced_ids:
+            ai_messages.append(f"已优化 {len(enhanced_ids)} 条互动选项")
+    else:
+        ai_messages.append("未配置 AI，仅使用规则引擎诊断")
 
-    payload = _diagnosis_payload(result, ai_used, enhanced_ids)
+    payload = _diagnosis_payload(
+        result,
+        ai_used,
+        enhanced_ids,
+        ai_only_ids,
+        ai_discover_count=ai_discover_count,
+        ai_message="；".join(ai_messages),
+    )
+
+    # 重新诊断后旧互动会话失效（发现列表可能已变）
+    try:
+        db.clear_interaction_db()
+    except Exception:
+        logger.info("清空互动会话失败，忽略")
 
     db.save_diagnosis(
         session_version=session.get_version(),
@@ -127,7 +204,7 @@ def _run_diagnosis(ai: bool = True) -> dict:
 
 @router.post("/run")
 def run_diagnosis() -> dict:
-    """执行第一轮诊断（规则引擎 + 可选 AI 增强），保存并返回结果。"""
+    """执行第一轮诊断（规则引擎 + DeepSeek 补充发现与出题优化）。"""
     return _run_diagnosis(ai=True)
 
 
