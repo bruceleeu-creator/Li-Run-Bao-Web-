@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Excel 临时锁文件（Office 打开时生成）
+~$*.xlsx
+.~*.xlsx
+
+# pytest 缓存
+.pytest_cache/
+
+# 本地工具/代理状态（不入库）
+.claude/
+.superpowers/
+.scratch/
+/test-results/
+
+# 发布包产物（不入库，本地构建）
+release/
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# Web 前端依赖与产物
+node_modules/
+web_frontend/dist/
+web_frontend/test-results/
+web_frontend/playwright-report/
+
+# Web 后端本地工作区（用户上传文件，不入库）
+web_backend/workspaces/
+
+# Output
+# demo_output/ 默认全部忽略，仅精确放行正式发布的示例产物（xlsx/docx/pdf/png）
+demo_output/*
+!demo_output/.gitkeep
+!demo_output/sample_finance.xlsx
+!demo_output/trend.png
+!demo_output/budget_3sheet_WB-CO-TR-20260726.xlsx
+!demo_output/budget_report_WB-CO-TR-20260726.docx
+!demo_output/budget_report_WB-CO-TR-20260726.pdf
+
+# Config
+*.env
+config.local.py
+# 大模型配置文件（含 API Key，禁止入库；gui.py 仅在内存中持有 Key）
+.ai_config.json
+.ai_config.local.json
+
+# Logs
+*.log
