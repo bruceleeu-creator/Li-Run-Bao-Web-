@@ -320,8 +320,8 @@ def test_budget_from_session_extracts_indicators():
     assert ti["last_year_cost"] == 10_530_000
     assert "结构化提取" in body["source_note"]
     assert body["method"] == "fallback"
-    # 比例字段保持模板默认
-    assert ti["income_tax_rate"] == 0.05
+    # 比例字段保持模板默认（E4 高新 15%）
+    assert ti["income_tax_rate"] == 0.15
 
 
 def test_budget_from_session_uses_ai(monkeypatch):

@@ -8,9 +8,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from . import budget as budget_mod
 from . import finance as fin
 from . import industry as ind
 from .models import FinancialData
+
+# 名义所得税率默认（与 Policy / budget 一致；diagnose 时会被 session policy 覆盖）
+_DEFAULT_CIT_RATE = float(getattr(budget_mod, "DEFAULT_INCOME_TAX_RATE", 0.15))
 
 # 严重度
 SEVERITY_HIGH = "高"
@@ -141,7 +145,7 @@ def _build_rd_options(revenue: float) -> List[Option]:
     target_b = revenue * 0.03  # 行业下限 3%（金额，元）
     # 研发费用 100% 加计扣除：扣除总额 = 投入 × 2.0；节约税款 = 投入 × 1.0 × 税率
     rd_deduction_rate = 1.0  # 项目测算默认值：研发费用 100% 加计扣除（待核验适用条件）
-    cit_rate = 0.25  # 项目测算默认值：企业所得税率 25%（待核验企业实际适用税率）
+    cit_rate = _DEFAULT_CIT_RATE
     return [
         Option(
             label="A",
@@ -219,7 +223,7 @@ def _build_entertainment_options(revenue: float, current: float) -> List[Option]
     target_a = deduct_limit / ENTERTAIN_DEDUCT_RATIO  # 发生额上限（金额，元）
     # 选项 B：压缩到营收 0.4%
     target_b = revenue * 0.004  # 金额，元
-    cit_rate = 0.25  # 项目测算默认值：企业所得税率 25%（待核验企业实际适用税率）
+    cit_rate = _DEFAULT_CIT_RATE
     # 限额内可扣部分 = deduct_limit；不可扣部分 = current - deduct_limit
     # 压降到 target_a 时：可扣部分 = target_a * 60% 与营收 0.5% 孰低
     def _calc_savings(cur_amt: float, tgt_amt: float) -> tuple:
@@ -295,7 +299,7 @@ def _build_consulting_options(revenue: float, current: float) -> List[Option]:
     """
     target_a = revenue * 0.01  # 压到 1%（金额，元）
     target_b = revenue * 0.02  # 压到 2%（金额，元）
-    cit_rate = 0.25
+    cit_rate = _DEFAULT_CIT_RATE
     cs_a = fin.cost_saving_estimate(current, target_a)
     ti_a = fin.tax_impact_estimate(current, target_a, cit_rate)
     cs_b = fin.cost_saving_estimate(current, target_b)
@@ -518,7 +522,7 @@ def _build_amount_raise_options(
     target_b: float,
     action_a: str,
     action_b: str,
-    tax_rate: float = 0.25,
+    tax_rate: float = _DEFAULT_CIT_RATE,
     deduction_rate: float = 1.0,
 ) -> List[Option]:
     """通用金额上调类 A/B/C（限额内据实扣除/研发等）。"""
@@ -1524,6 +1528,7 @@ def diagnose(data: FinancialData) -> DiagnosisResult:
 
     覆盖：税负对标、成本费用结构、真实性风险、经营质量（回款/杠杆/趋势）。
     全部规则为确定性判定，不依赖 AI；所有建议限于合法税务筹划与管理优化范畴。
+    选项 tax_rate 统一取自 PolicySnapshot.E4（导入管线写入）。
     """
     benchmark, fallback = ind.get_benchmark(data.industry)
     findings: List[Finding] = []
@@ -1578,6 +1583,14 @@ def diagnose(data: FinancialData) -> DiagnosisResult:
             # 统一填入每个 Option 的 est_saving = cost_saving + tax_saving - tax_impact
             _finalize_option_savings(f.options)
             findings.append(f)
+
+    # Policy 单点：选项名义税率 E4 与导入会话一致
+    try:
+        from . import pipeline as pipeline_mod
+
+        pipeline_mod.stamp_findings_tax_rate(findings, data)
+    except Exception:
+        pass
 
     # 高严重度优先，其次中、低；同级保持规则顺序
     severity_rank = {SEVERITY_HIGH: 0, SEVERITY_MEDIUM: 1, SEVERITY_LOW: 2}

@@ -151,10 +151,6 @@ def _run_diagnosis(ai: bool = True) -> dict:
             logger.info("诊断 AI 补充发现失败（%s），仅保留规则发现", type(e).__name__)
             ai_messages.append(f"DeepSeek 补充发现失败，已回退规则：{type(e).__name__}")
 
-        # 严重度排序：高 → 中 → 低
-        rank = {"高": 0, "中": 1, "低": 2}
-        result.findings.sort(key=lambda x: rank.get(x.severity, 9))
-
         # ② 逐条优化 A/B/C 互动选项（带企业数据上下文）
         for finding in result.findings:
             try:
@@ -174,6 +170,11 @@ def _run_diagnosis(ai: bool = True) -> dict:
             ai_messages.append(f"已优化 {len(enhanced_ids)} 条互动选项")
     else:
         ai_messages.append("未配置 AI，仅使用规则引擎诊断")
+
+    # 风险等级排序：低（上，绿）→ 中（中，橙）→ 高（下，红）
+    from core import compliance_policy as compliance_mod
+
+    result.findings = compliance_mod.sort_findings_by_severity(list(result.findings or []))
 
     payload = _diagnosis_payload(
         result,

@@ -260,27 +260,44 @@ _RED_FILL = "FEE2E2"  # 预算费用重点（红色语义）
 _YELLOW_FILL = "FEF3C7"  # 差额/剩余额度重点（黄色语义）
 _INPUT_FILL = "F0F9FF"  # 可输入单元格底色
 _FORMULA_FILL = "F8FAFC"  # 公式单元格底色
+# 合规提示色：绿=达标 · 红=超标/风险（单格着色，便于老板扫一眼）
+_OK_FILL = "D1FAE5"       # 浅绿底
+_OK_FONT = "047857"       # 深绿字
+_BAD_FILL = "FECACA"      # 浅红底
+_BAD_FONT = "B91C1C"      # 深红字
+_WARN_FILL = "FFEDD5"     # 浅橙底
+_WARN_FONT = "C2410C"     # 深橙字
 
 
-def write_template(plan: BudgetPlan, path: str, session=None) -> str:
-    """写出 BudgetPlan 到 Excel（保留模板结构与红/黄重点语义）。
+def _paint_ok(cell, Font, PatternFill) -> None:
+    cell.fill = PatternFill("solid", fgColor=_OK_FILL)
+    cell.font = Font(size=10, bold=True, color=_OK_FONT)
 
-    - 顶部公式使用 Excel 公式（IF(C2=0,0,...)）
-    - 明细 E/F/H/J 使用 Excel 公式
-    - 工会经费 R90 补齐 F/H/J 公式
-    - E8 = I98 联动
-    - G100 = E7 - G98
-    - 自动筛选 A13:J98
-    - 冻结窗格 A14
-    - 空白态 0 公式错误
-    - P0-2：同一工作簿创建第三 Sheet「诊断与行动清单」（有 session 时填决策，无则空表头）
-    - P0-3：禁止覆盖原始模板（比较规范化真实路径）
-    - P1-2：打印设置（横向 A4 / fitToWidth=1 / 重复表头行 / 合理页边距）
+
+def _paint_bad(cell, Font, PatternFill) -> None:
+    cell.fill = PatternFill("solid", fgColor=_BAD_FILL)
+    cell.font = Font(size=10, bold=True, color=_BAD_FONT)
+
+
+def _paint_warn(cell, Font, PatternFill) -> None:
+    cell.fill = PatternFill("solid", fgColor=_WARN_FILL)
+    cell.font = Font(size=10, bold=True, color=_WARN_FONT)
+
+
+def write_template(plan: BudgetPlan, path: str, session=None, financial_data=None) -> str:
+    """写出 BudgetPlan 到 Excel（建模 + 合规约束 Sheet）。
+
+    Sheet：
+    1. 费用预算表（金额输入 + 占比/毛利预计算）
+    2. 行业企业所得税贡献率参考
+    3. 诊断与行动清单
+    4. 费用合规筹划约束（三条硬规则 + 历史占比 + 增速/行业硬顶，交付可见）
 
     Args:
         plan: 预算计划
         path: 导出路径
-        session: 可选诊断会话（core.interactive.Session）；有则第三 Sheet 填决策数据
+        session: 可选诊断会话
+        financial_data: 可选 FinancialData，用于写入历史费用率与合规硬顶
 
     Raises:
         TemplateError: 路径冲突或写出失败
@@ -294,13 +311,27 @@ def write_template(plan: BudgetPlan, path: str, session=None) -> str:
                 f"导出路径与原始模板路径相同（{dst_real}），禁止覆盖原始模板。请另存为新文件。"
             )
 
-    # P0-C（CO T7 重开）：导出前调用 validate_plan；失败时不写入任何文件、不修改 plan
-    from .budget import validate_plan
+    from .budget import compute_all, validate_plan
+
+    compute_all(plan)
     ok, errors = validate_plan(plan)
     if not ok:
         raise TemplateError(
             "预算计划校验未通过，拒绝导出 Excel：\n  - " + "\n  - ".join(errors)
             + "\n请先在「2. 模板工作台」修正输入后再导出。"
+        )
+    # 内存模型仍保持 E/H 与 D/G 一致（供报告/API），Excel 侧用公式自算
+    ti0 = plan.top_inputs
+    c2_0 = float(ti0.budget_revenue or 0)
+    c6_0 = float(ti0.last_year_revenue or 0)
+    for line in plan.lines:
+        d0 = float(line.last_year_actual or 0)
+        g0 = float(line.budget_amount or 0)
+        line.last_year_expense_ratio = (
+            round(d0 / c6_0, 8) if (c6_0 > 0 and d0 > 0) else 0.0
+        )
+        line.budget_expense_ratio = (
+            round(g0 / c2_0, 8) if (c2_0 > 0 and g0 > 0) else 0.0
         )
 
     openpyxl, Alignment, Border, Font, PatternFill, Side, get_column_letter, DataValidation = _require_openpyxl()
@@ -310,8 +341,10 @@ def write_template(plan: BudgetPlan, path: str, session=None) -> str:
         wb = openpyxl.Workbook()
         _build_budget_sheet(wb, openpyxl, Alignment, Border, Font, PatternFill, Side, DataValidation, plan)
         _build_industry_benchmark_sheet(wb, openpyxl, Alignment, Border, Font, PatternFill, Side, plan)
-        # P0-2：第三 Sheet「诊断与行动清单」
         _build_action_summary_sheet(wb, openpyxl, Alignment, Border, Font, PatternFill, Side, plan, session)
+        _build_compliance_policy_sheet(
+            wb, openpyxl, Alignment, Border, Font, PatternFill, Side, plan, financial_data, session
+        )
         wb.save(path)
         return path
     except TemplateError:
@@ -398,7 +431,7 @@ def _build_budget_sheet(
             cell.alignment = Alignment(horizontal="left", vertical="center")
             _apply_border(cell, Border, Side)
 
-    # 顶部公式（C4/C5/C7/C9/E5/E6/E7/E8/E9）— 全部加入零值保护
+    # 顶部公式列（与 core.budget.compute_top 一致；改 C2/C3/E3/E4 自动重算）
     ws["C4"] = "=C2-C3"
     ws["C5"] = "=IF(C2=0,0,C4/C2)"
     ws["C7"] = "=IF(C6=0,0,(C2-C6)/C6)"
@@ -406,21 +439,17 @@ def _build_budget_sheet(
     ws["E5"] = "=E3*C2"
     ws["E6"] = "=IF(E4=0,0,E5/E4)"
     ws["E7"] = "=C4-E6"
-    ws["E8"] = "=I98"  # 与明细联动
+    ws["E8"] = "=I98"
     ws["E9"] = "=E7-E8"
     for coord in ("C4", "C5", "C7", "C9", "E5", "E6", "E7", "E8", "E9"):
         _apply_formula_style(ws[coord], Font, PatternFill, Alignment, Border, Side)
-    # 比例格式
     for coord in ("C5", "C7", "C9", "E2", "E3", "E4"):
         ws[coord].number_format = "0.00%"
-    # 金额格式
     for coord in ("C2", "C3", "C4", "C6", "C8", "E5", "E6", "E7", "E8", "E9"):
         ws[coord].number_format = '#,##0.00'
 
-    # E7 费用预算上限：红色重点（小于 0 时显示高风险提示）
     ws["E7"].fill = PatternFill("solid", fgColor=_RED_FILL)
     ws["E7"].font = Font(size=10, bold=True, color="B91C1C")
-    # E9 费用差额：黄色重点
     ws["E9"].fill = PatternFill("solid", fgColor=_YELLOW_FILL)
     ws["E9"].font = Font(size=10, bold=True)
 
@@ -451,23 +480,47 @@ def _build_budget_sheet(
         _apply_border(cell, Border, Side)
     ws.row_dimensions[13].height = 32
 
-    # 第 14-97 行：84 行明细
+    # 第 14-97 行：输入 D/G/I；派生列写预计算值；G/H/J 按合规规则单格标绿/标红
+    from . import compliance_policy as compliance_mod
+
+    c2_top = float(plan.top_inputs.budget_revenue or 0)
+    c6_top = float(plan.top_inputs.last_year_revenue or 0)
+    c7_top = float(plan.top_computed.revenue_growth_rate or 0)
+    f98_sum = 0.0
+    max_single = compliance_mod.MAX_SINGLE_LINE_RATIO
+    max_rigid = compliance_mod.MAX_SINGLE_LINE_RATIO_RIGID
+    fee_growth_cap = c7_top + compliance_mod.FEE_GROWTH_BUFFER_PP
+
+    def _is_rigid_name(name: str) -> bool:
+        return any(k in (name or "") for k in ("工资", "薪酬", "社保", "公积金", "房租", "租赁", "奖金"))
+
     for line in plan.lines:
         r = line.row
-        # 字典列
+        d_val = round(float(line.last_year_actual or 0), 2)
+        g_val = round(float(line.budget_amount or 0), 2)
+        i_val = round(float(line.actual_amount or 0), 2)
+        f_raw = float(getattr(line, "reference_amount", 0) or 0)
+
+        e_val = round(d_val / c6_top, 8) if (d_val > 0 and c6_top > 0) else 0.0
+        if d_val > 0:
+            f_write = round(d_val * (1.0 + c7_top), 2)
+        else:
+            f_write = round(f_raw if f_raw > 0 else g_val, 2)
+        f98_sum += f_write
+        h_val = round(g_val / c2_top, 8) if (g_val > 0 and c2_top > 0) else 0.0
+        j_val = round(g_val - i_val, 2)
+
         ws.cell(row=r, column=1, value=line.subject)
         ws.cell(row=r, column=2, value=line.expense_name)
         ws.cell(row=r, column=3, value=line.invoice_name)
-        # 输入列：D / G / I
-        ws.cell(row=r, column=4, value=round(line.last_year_actual, 2))
-        ws.cell(row=r, column=7, value=round(line.budget_amount, 2))
-        ws.cell(row=r, column=9, value=round(line.actual_amount, 2))
-        # 公式列：E / F / H / J
-        ws.cell(row=r, column=5, value=f"=IF($C$6=0,0,D{r}/$C$6)")
-        ws.cell(row=r, column=6, value=f"=D{r}*(1+$C$7)")
-        ws.cell(row=r, column=8, value=f"=IF($C$2=0,0,G{r}/$C$2)")
-        ws.cell(row=r, column=10, value=f"=G{r}-I{r}")
-        # 样式
+        ws.cell(row=r, column=4, value=d_val)
+        ws.cell(row=r, column=5, value=e_val)
+        ws.cell(row=r, column=6, value=f_write)
+        ws.cell(row=r, column=7, value=g_val)
+        ws.cell(row=r, column=8, value=h_val)
+        ws.cell(row=r, column=9, value=i_val)
+        ws.cell(row=r, column=10, value=j_val)
+
         for col in (1, 2, 3):
             cell = ws.cell(row=r, column=col)
             cell.font = Font(size=10)
@@ -480,34 +533,63 @@ def _build_budget_sheet(
         for col in (5, 8):
             cell = ws.cell(row=r, column=col)
             _apply_formula_style(cell, Font, PatternFill, Alignment, Border, Side)
-            cell.number_format = '0.00%'
+            cell.number_format = '0.0000%'
         for col in (6, 10):
             cell = ws.cell(row=r, column=col)
             _apply_formula_style(cell, Font, PatternFill, Alignment, Border, Side)
             cell.number_format = '#,##0.00'
-        # 工会经费 R90：补齐 F/H/J（已通过通用公式补齐，此处仅标记）
-        if line.row == 90:
-            ws.cell(row=r, column=6).comment = None  # 不留旧注释
-        # G 列（预算费用）红色重点
-        ws.cell(row=r, column=7).fill = PatternFill("solid", fgColor=_RED_FILL)
-        ws.cell(row=r, column=7).font = Font(size=10, bold=True)
-        # J 列（差额）黄色重点
-        ws.cell(row=r, column=10).fill = PatternFill("solid", fgColor=_YELLOW_FILL)
-        ws.cell(row=r, column=10).font = Font(size=10, bold=True)
 
-    # 第 98 行：合计
+        # ── 单格合规色（用户提示：绿达标 / 红超标）──
+        g_cell = ws.cell(row=r, column=7)
+        h_cell = ws.cell(row=r, column=8)
+        j_cell = ws.cell(row=r, column=10)
+        cap_line = max_rigid if _is_rigid_name(line.expense_name) else max_single
+        if g_val > 0 and c2_top > 0:
+            if h_val > cap_line + 1e-9:
+                # 单行占营收超上限 → 红
+                _paint_bad(g_cell, Font, PatternFill)
+                _paint_bad(h_cell, Font, PatternFill)
+            else:
+                # 有预算且未超单行上限 → 绿
+                _paint_ok(g_cell, Font, PatternFill)
+                _paint_ok(h_cell, Font, PatternFill)
+            # 有上年时：费用增速是否匹配收入增速（G 相对 D）
+            if d_val > 0:
+                g_growth = (g_val - d_val) / d_val
+                if g_growth > fee_growth_cap + 1e-9:
+                    _paint_bad(g_cell, Font, PatternFill)
+                    f_cell = ws.cell(row=r, column=6)
+                    _paint_warn(f_cell, Font, PatternFill)
+        # J=G−I：实际超预算 → 红；有预算且未超支 → 绿
+        if g_val > 0 or i_val > 0:
+            if j_val < -0.01:
+                _paint_bad(j_cell, Font, PatternFill)
+            elif g_val > 0 and j_val >= 0:
+                _paint_ok(j_cell, Font, PatternFill)
+            else:
+                j_cell.fill = PatternFill("solid", fgColor=_YELLOW_FILL)
+                j_cell.font = Font(size=10, bold=True)
+        else:
+            j_cell.fill = PatternFill("solid", fgColor=_YELLOW_FILL)
+            j_cell.font = Font(size=10, bold=True)
+
+    # 第 98 行：合计（预计算数值，打开即见）
     ws.cell(row=98, column=1, value="合计")
     ws.cell(row=98, column=1).font = Font(bold=True, size=11)
     ws.cell(row=98, column=1).alignment = Alignment(horizontal="center", vertical="center")
     ws.merge_cells("A98:C98")
-    # D98/G98/I98/J98 求和；E98/F98/H98 联动
-    ws["D98"] = f"=SUM(D{TEMPLATE_FIRST_ROW}:D{TEMPLATE_LAST_ROW})"
-    ws["E98"] = "=IF($C$6=0,0,D98/$C$6)"
-    ws["F98"] = "=D98*(1+$C$7)"
-    ws["G98"] = f"=SUM(G{TEMPLATE_FIRST_ROW}:G{TEMPLATE_LAST_ROW})"
-    ws["H98"] = "=IF($C$2=0,0,G98/$C$2)"
-    ws["I98"] = f"=SUM(I{TEMPLATE_FIRST_ROW}:I{TEMPLATE_LAST_ROW})"
-    ws["J98"] = f"=SUM(J{TEMPLATE_FIRST_ROW}:J{TEMPLATE_LAST_ROW})"
+    d98 = round(sum(float(l.last_year_actual or 0) for l in plan.lines), 2)
+    g98 = round(sum(float(l.budget_amount or 0) for l in plan.lines), 2)
+    i98 = round(sum(float(l.actual_amount or 0) for l in plan.lines), 2)
+    e98 = round(d98 / c6_top, 8) if c6_top > 0 else 0.0
+    h98 = round(g98 / c2_top, 8) if c2_top > 0 else 0.0
+    ws["D98"] = d98
+    ws["E98"] = e98
+    ws["F98"] = round(f98_sum, 2)
+    ws["G98"] = g98
+    ws["H98"] = h98
+    ws["I98"] = i98
+    ws["J98"] = round(g98 - i98, 2)
     for col in (4, 6, 7, 9, 10):
         ws.cell(row=98, column=col).number_format = '#,##0.00'
         ws.cell(row=98, column=col).font = Font(bold=True, size=11)
@@ -518,20 +600,61 @@ def _build_budget_sheet(
         cell = ws.cell(row=98, column=col)
         _apply_border(cell, Border, Side)
         cell.fill = PatternFill("solid", fgColor="F1F5F9")
+    # 合计费用率 H98：相对行业带 / 硬顶 绿红提示
+    try:
+        from . import industry as ind_mod
+
+        band = ind_mod.get_period_expense_ratio_band(plan.industry or "")
+        hi = float(band.get("max") or 0.18)
+        lo = float(band.get("min") or 0.08)
+        h98_cell = ws["H98"]
+        g98_cell = ws["G98"]
+        if h98 > hi + 1e-9:
+            _paint_bad(h98_cell, Font, PatternFill)
+            _paint_bad(g98_cell, Font, PatternFill)
+        elif h98 >= lo - 1e-9:
+            _paint_ok(h98_cell, Font, PatternFill)
+            _paint_ok(g98_cell, Font, PatternFill)
+        elif h98 > 0:
+            _paint_warn(h98_cell, Font, PatternFill)
+    except Exception:
+        pass
     ws.row_dimensions[98].height = 24
 
-    # G100 未分配余额
+    # 顶部派生列：预计算（与引擎一致，打开即见）
+    tc = plan.top_computed
+    ws["C4"] = round(float(tc.gross_profit or 0), 2)
+    ws["C5"] = round(float(tc.gross_margin or 0), 6)
+    ws["C7"] = round(float(tc.revenue_growth_rate or 0), 6)
+    ws["C9"] = round(float(tc.last_year_gross_margin or 0), 6)
+    ws["E5"] = round(float(tc.income_tax_budget or 0), 2)
+    ws["E6"] = round(float(tc.profit_total_budget or 0), 2)
+    ws["E7"] = round(float(tc.expense_budget_cap or 0), 2)
+    ws["E8"] = i98
+    ws["E9"] = round(float(tc.expense_budget_cap or 0) - i98, 2)
+    for coord in ("C4", "C5", "C7", "C9", "E5", "E6", "E7", "E8", "E9"):
+        _apply_formula_style(ws[coord], Font, PatternFill, Alignment, Border, Side)
+    for coord in ("C5", "C7", "C9"):
+        ws[coord].number_format = "0.00%"
+    for coord in ("C4", "E5", "E6", "E7", "E8", "E9"):
+        ws[coord].number_format = '#,##0.00'
+    ws["E7"].fill = PatternFill("solid", fgColor=_RED_FILL)
+    ws["E7"].font = Font(size=10, bold=True, color="B91C1C")
+    ws["E9"].fill = PatternFill("solid", fgColor=_YELLOW_FILL)
+    ws["E9"].font = Font(size=10, bold=True)
+
+    # G100 未分配余额（预计算）
     ws["A100"] = "未分配余额"
     ws["A100"].font = Font(bold=True, size=11, color="B91C1C")
     ws["A100"].alignment = Alignment(horizontal="right", vertical="center")
     ws.merge_cells("A100:F100")
-    ws["G100"] = "=E7-G98"
+    ws["G100"] = round(float(tc.expense_budget_cap or 0) - g98, 2)
     ws["G100"].font = Font(bold=True, size=11, color="B91C1C")
     ws["G100"].fill = PatternFill("solid", fgColor=_YELLOW_FILL)
     ws["G100"].number_format = '#,##0.00'
     ws["G100"].alignment = Alignment(horizontal="right", vertical="center")
     _apply_border(ws["G100"], Border, Side)
-    ws["H100"] = "（负数表示预算分配超上限）"
+    ws["H100"] = "建模：E=D/C6 · H=G/C2 · F(有D)=D×(1+C7) · 毛利率等已预计算写入，打开即可见"
     ws["H100"].font = Font(size=9, color="B91C1C", italic=True)
     ws.merge_cells("H100:J100")
 
@@ -546,9 +669,13 @@ def _build_budget_sheet(
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
-    # 顶部说明
-    ws["A11"] = "说明：D/G/I 为输入列（蓝色底）；E/F/H/J 为公式列（灰色底，自动计算）；红色为重点字段；黄色为差额/剩余额度。"
-    ws["A11"].font = Font(size=9, italic=True, color="555555")
+    # 顶部说明 + 合规硬规则摘要 + 颜色图例
+    ws["A11"] = (
+        "说明：D/G/I 输入；E=D/上年营收、H=G/预算营收已建模。"
+        "【颜色】绿=合规达标 · 橙=关注 · 红=超标/风险（单行费用率、费用增速、合计费用率、J=G−I）。"
+        "【规则】①历史费用率对标 ②金税四期可筹划范围 ③费用增幅匹配营收增速。详见「费用合规筹划约束」。"
+    )
+    ws["A11"].font = Font(size=9, italic=True, color="B91C1C")
     ws.merge_cells("A11:J11")
 
     # P1-2：E4 所得税率下拉数据验证（5% / 15% / 25%）+ 状态列条件格式
@@ -559,10 +686,10 @@ def _build_budget_sheet(
             allow_blank=False,
             showErrorMessage=True,
             errorTitle="税率非法",
-            error="E4 所得税率必须为 0.05 / 0.15 / 0.25 之一（5%/15%/25%）；项目默认值待核验。",
+            error="E4 所得税率必须为 0.05 / 0.15 / 0.25 之一（5%/15%/25%）；项目默认 0.15（高新）。",
             showInputMessage=True,
             promptTitle="E4 所得税率",
-            prompt="请选择 0.05（小型微利）/ 0.15（高新技术企业）/ 0.25（标准税率）",
+            prompt="默认 0.15（高新技术企业）；可选 0.05（小型微利）/ 0.25（标准税率）",
         )
         dv.add("E4")
         ws.add_data_validation(dv)
@@ -645,6 +772,465 @@ def _build_industry_benchmark_sheet(
 
     ws.freeze_panes = "A3"
     _apply_print_settings(ws, landscape=False, fit_width=1, repeat_rows="1:2")
+
+
+def _build_compliance_policy_sheet(
+    wb,
+    openpyxl,
+    Alignment,
+    Border,
+    Font,
+    PatternFill,
+    Side,
+    plan: BudgetPlan,
+    financial_data=None,
+    session=None,
+) -> None:
+    """Sheet4：费用合规筹划约束——三条硬规则 + 量化硬顶（交付必须可见）。"""
+    from openpyxl.utils import get_column_letter
+
+    from . import compliance_policy as compliance_mod
+    from . import industry as ind_mod
+
+    ws = wb.create_sheet("费用合规筹划约束")
+    green = "3ECF8E"
+    orange = "FF7A3D"
+    red = "FF5D5D"
+    navy = "1E3A8A"
+
+    ws["A1"] = "费用合规筹划约束（必须严格执行 · 金税四期方向）"
+    ws["A1"].font = Font(bold=True, size=14, color=navy)
+    ws.merge_cells("A1:F1")
+    ws.row_dimensions[1].height = 28
+
+    ws["A2"] = (
+        f"企业：{plan.company_name or '—'}　行业：{plan.industry or '—'}　"
+        f"预算年：{plan.year or '—'}　生成说明：编制与导出均绑定本表规则"
+    )
+    ws["A2"].font = Font(size=10, color="555555")
+    ws.merge_cells("A2:F2")
+
+    # ── 一、三条硬规则 ──
+    ws["A4"] = "一、必须严格执行的三条规则"
+    ws["A4"].font = Font(bold=True, size=12, color=navy)
+    ws.merge_cells("A4:F4")
+    for i, rule in enumerate(compliance_mod.HARD_RULES_LIST, start=1):
+        r = 4 + i
+        ws.cell(row=r, column=1, value=f"{i}.")
+        ws.cell(row=r, column=1).font = Font(bold=True, size=11, color=red)
+        ws.cell(row=r, column=2, value=rule)
+        ws.cell(row=r, column=2).font = Font(size=11)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+        ws.row_dimensions[r].height = 36
+        for c in range(1, 7):
+            _apply_border(ws.cell(row=r, column=c), Border, Side)
+            ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor="FEF3C7")
+
+    # ── 二、量化约束 ──
+    row = 9
+    ws.cell(row=row, column=1, value="二、量化约束（历史对标 · 增速匹配 · 行业区间）")
+    ws.cell(row=row, column=1).font = Font(bold=True, size=12, color=navy)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+
+    ws["A3"] = "颜色图例：  绿底=合规达标    橙底=关注    红底=超标/风险（按用户合规提示逐格着色）"
+    ws["A3"].font = Font(size=10, bold=True, color="555555")
+    ws.merge_cells("A3:F3")
+    _paint_ok(ws["A3"], Font, PatternFill)
+    ws["A3"].font = Font(size=10, bold=True, color=_OK_FONT)
+
+    row = 10
+    headers = ["指标", "数值", "说明", "状态", "", ""]
+    for ci, h in enumerate(headers[:4], start=1):
+        cell = ws.cell(row=row, column=ci, value=h)
+        _apply_header_style(cell, Font, PatternFill, Alignment)
+        _apply_border(cell, Border, Side)
+
+    lim = None
+    if financial_data is not None:
+        try:
+            lim = compliance_mod.budget_amount_limits(financial_data, plan.industry or "")
+        except Exception:
+            lim = None
+    if lim is None:
+        band = ind_mod.get_period_expense_ratio_band(plan.industry or "")
+        c2 = float(plan.top_inputs.budget_revenue or 0)
+        c6 = float(plan.top_inputs.last_year_revenue or 0)
+        c7 = float(plan.top_computed.revenue_growth_rate or 0) if plan.top_computed else 0.0
+        g_sum = float(plan.allocated_total or 0)
+        d_sum = float(plan.last_year_total or 0)
+        lim = {
+            "revenue_growth_rate": c7,
+            "max_fee_growth_rate": c7 + compliance_mod.FEE_GROWTH_BUFFER_PP,
+            "target_period_expense_ratio": float(band.get("median") or 0.12),
+            "target_period_expense_total": round(c2 * float(band.get("median") or 0.12), 2),
+            "hard_cap_period_expense_total": round(c2 * float(band.get("max") or 0.18), 2),
+            "industry_fee_band": band,
+            "historical": {
+                "by_year": {},
+                "revenue_growth_rate": c7,
+            },
+            "max_single_line_ratio": compliance_mod.MAX_SINGLE_LINE_RATIO,
+            "max_single_line_ratio_rigid": compliance_mod.MAX_SINGLE_LINE_RATIO_RIGID,
+            "_fallback": True,
+            "_plan_g": g_sum,
+            "_plan_d": d_sum,
+            "_c2": c2,
+            "_c6": c6,
+        }
+    else:
+        lim["_plan_g"] = float(plan.allocated_total or 0)
+        lim["_c2"] = float(plan.top_inputs.budget_revenue or 0)
+
+    band = lim.get("industry_fee_band") or {}
+    c2 = float(lim.get("_c2") or plan.top_inputs.budget_revenue or 0)
+    g_sum = float(lim.get("_plan_g") or plan.allocated_total or 0)
+    fee_rate = (g_sum / c2) if c2 > 0 else 0.0
+    hard_cap = float(lim.get("hard_cap_period_expense_total") or 0)
+    rows_metrics = [
+        ("预算营业收入 C2（元）", c2, "建模分母：H=G/C2"),
+        ("收入增长率", float(lim.get("revenue_growth_rate") or 0), "（C2−C6）/C6"),
+        (
+            "费用增速上限",
+            float(lim.get("max_fee_growth_rate") or 0),
+            "收入增速(波动年 winsor) + 3pp；模式="
+            + str(lim.get("fee_growth_mode") or "raw_plus_buffer"),
+        ),
+        ("行业费用率下限", float(band.get("min") or 0), "WB 行业带"),
+        ("行业费用率中枢", float(band.get("median") or 0), "WB 行业带"),
+        ("行业费用率上限", float(band.get("max") or 0), "WB 行业带"),
+        ("目标期间费用率", float(lim.get("target_period_expense_ratio") or 0), "历史与行业中枢夹逼"),
+        ("目标期间费用合计（元）", float(lim.get("target_period_expense_total") or 0), "营收×目标费用率"),
+        ("费用硬顶合计（元）", hard_cap, "min(增速匹配上限, 行业带上限)"),
+        ("本表预算费用 ΣG（元）", g_sum, "当前导出表合计"),
+        ("本表总费用率 ΣG/C2", fee_rate, "须 ≤ 硬顶/行业上沿；过高标红"),
+        ("单行费用率上限（一般）", float(lim.get("max_single_line_ratio") or 0.08), "占营收"),
+        ("单行费用率上限（刚性）", float(lim.get("max_single_line_ratio_rigid") or 0.12), "工资/社保/房租"),
+    ]
+    r0 = 11
+    band_lo = float(band.get("min") or 0.08)
+    band_hi = float(band.get("max") or 0.18)
+    target_rate = float(lim.get("target_period_expense_ratio") or band.get("median") or 0.12)
+    for i, (name, val, note) in enumerate(rows_metrics):
+        r = r0 + i
+        ws.cell(row=r, column=1, value=name)
+        cell_v = ws.cell(row=r, column=2, value=val)
+        if "率" in name or "增速" in name:
+            cell_v.number_format = "0.00%"
+        else:
+            cell_v.number_format = "#,##0.00"
+        ws.cell(row=r, column=3, value=note)
+        status = "—"
+        # 按指标给「数值」单格绿/红
+        if name.startswith("本表总费用率"):
+            if hard_cap > 0 and c2 > 0 and g_sum > hard_cap * 1.01:
+                _paint_bad(cell_v, Font, PatternFill)
+                status = "超硬顶"
+            elif fee_rate > band_hi + 1e-9:
+                _paint_bad(cell_v, Font, PatternFill)
+                status = "超行业上限"
+            elif fee_rate < band_lo - 1e-9 and fee_rate > 0:
+                _paint_warn(cell_v, Font, PatternFill)
+                status = "低于行业下限"
+            elif fee_rate > 0:
+                _paint_ok(cell_v, Font, PatternFill)
+                status = "达标"
+        elif name.startswith("本表预算费用"):
+            if hard_cap > 0 and g_sum > hard_cap * 1.01:
+                _paint_bad(cell_v, Font, PatternFill)
+                status = "超硬顶"
+            elif g_sum > 0:
+                _paint_ok(cell_v, Font, PatternFill)
+                status = "已填报"
+        elif name.startswith("费用硬顶"):
+            if hard_cap > 0:
+                _paint_ok(cell_v, Font, PatternFill)
+                status = "上限"
+        elif name.startswith("目标期间费用率"):
+            if band_lo - 1e-9 <= target_rate <= band_hi + 1e-9:
+                _paint_ok(cell_v, Font, PatternFill)
+                status = "在行业带内"
+            else:
+                _paint_warn(cell_v, Font, PatternFill)
+                status = "偏离行业带"
+        elif name.startswith("收入增长率"):
+            if float(val) < -0.2:
+                _paint_warn(cell_v, Font, PatternFill)
+                status = "收入下滑"
+            else:
+                _paint_ok(cell_v, Font, PatternFill)
+                status = "已测算"
+        cell_st = ws.cell(row=r, column=4, value=status)
+        if status in ("超硬顶", "超行业上限"):
+            _paint_bad(cell_st, Font, PatternFill)
+        elif status in ("达标", "已填报", "在行业带内", "已测算", "上限"):
+            _paint_ok(cell_st, Font, PatternFill)
+        elif status not in ("—",):
+            _paint_warn(cell_st, Font, PatternFill)
+        for c in range(1, 5):
+            _apply_border(ws.cell(row=r, column=c), Border, Side)
+
+    # ── 三、历史费用占营收 ──
+    hist_start = r0 + len(rows_metrics) + 2
+    ws.cell(row=hist_start, column=1, value="三、历史成本费用占营收比例（对标）")
+    ws.cell(row=hist_start, column=1).font = Font(bold=True, size=12, color=navy)
+    ws.merge_cells(start_row=hist_start, start_column=1, end_row=hist_start, end_column=6)
+
+    h_header = hist_start + 1
+    for ci, h in enumerate(
+        ["年度", "营业收入", "期间费用合计", "期间费用率", "销售费用率", "管理费用率", "财务费用率"],
+        start=1,
+    ):
+        cell = ws.cell(row=h_header, column=ci, value=h)
+        _apply_header_style(cell, Font, PatternFill, Alignment)
+        _apply_border(cell, Border, Side)
+
+    by_year = (lim.get("historical") or {}).get("by_year") or {}
+    if by_year:
+        for i, y in enumerate(sorted(by_year.keys())):
+            r = h_header + 1 + i
+            yv = by_year[y]
+            ws.cell(row=r, column=1, value=str(y))
+            ws.cell(row=r, column=2, value=float(yv.get("revenue") or 0)).number_format = "#,##0.00"
+            ws.cell(row=r, column=3, value=float(yv.get("period_expense") or 0)).number_format = "#,##0.00"
+            ws.cell(row=r, column=4, value=float(yv.get("period_expense_ratio") or 0)).number_format = "0.00%"
+            ws.cell(row=r, column=5, value=float(yv.get("selling_ratio") or 0)).number_format = "0.00%"
+            ws.cell(row=r, column=6, value=float(yv.get("admin_ratio") or 0)).number_format = "0.00%"
+            ws.cell(row=r, column=7, value=float(yv.get("finance_ratio") or 0)).number_format = "0.00%"
+            for c in range(1, 8):
+                _apply_border(ws.cell(row=r, column=c), Border, Side)
+        hist_end = h_header + len(by_year)
+    else:
+        # 无 FinancialData：用本表 D/G 近似
+        r = h_header + 1
+        c6 = float(plan.top_inputs.last_year_revenue or 0)
+        d_sum = float(plan.last_year_total or 0)
+        ws.cell(row=r, column=1, value=str(plan.year or "上年") + "（表内D近似）")
+        ws.cell(row=r, column=2, value=c6).number_format = "#,##0.00"
+        ws.cell(row=r, column=3, value=d_sum).number_format = "#,##0.00"
+        ws.cell(row=r, column=4, value=(d_sum / c6 if c6 else 0)).number_format = "0.00%"
+        ws.cell(row=r, column=5, value="（导入财报后显示分年明细）")
+        ws.merge_cells(start_row=r, start_column=5, end_row=r, end_column=7)
+        for c in range(1, 8):
+            _apply_border(ws.cell(row=r, column=c), Border, Side)
+        hist_end = r
+
+    # ── 四、本表科目预算 vs 约束 ──
+    sub_start = hist_end + 2
+    ws.cell(row=sub_start, column=1, value="四、本表科目预算结构（对照利润表口径）")
+    ws.cell(row=sub_start, column=1).font = Font(bold=True, size=12, color=navy)
+    ws.merge_cells(start_row=sub_start, start_column=1, end_row=sub_start, end_column=6)
+
+    sh = sub_start + 1
+    for ci, h in enumerate(["科目", "上年D合计", "预算G合计", "G占营收", "状态", "备注"], start=1):
+        cell = ws.cell(row=sh, column=ci, value=h)
+        _apply_header_style(cell, Font, PatternFill, Alignment)
+        _apply_border(cell, Border, Side)
+    subjects = ["销售费用", "管理费用", "研发费用", "财务费用", "营业外支出"]
+    max_fee_g = float(lim.get("max_fee_growth_rate") or 0)
+    for i, subj in enumerate(subjects):
+        r = sh + 1 + i
+        lines = [l for l in plan.lines if l.subject == subj]
+        d_s = sum(float(l.last_year_actual or 0) for l in lines)
+        g_s = sum(float(l.budget_amount or 0) for l in lines)
+        ratio = (g_s / c2 if c2 else 0)
+        ws.cell(row=r, column=1, value=subj)
+        ws.cell(row=r, column=2, value=d_s).number_format = "#,##0.00"
+        cell_g = ws.cell(row=r, column=3, value=g_s)
+        cell_g.number_format = "#,##0.00"
+        cell_h = ws.cell(row=r, column=4, value=ratio)
+        cell_h.number_format = "0.00%"
+        note = ""
+        status = "—"
+        if g_s <= 0 and d_s <= 0:
+            status = "无数据"
+        elif d_s > 0 and g_s > d_s * (1 + max_fee_g + 0.001):
+            note = "G 增速超收入增速缓冲"
+            status = "超标"
+            _paint_bad(cell_g, Font, PatternFill)
+            _paint_bad(cell_h, Font, PatternFill)
+        elif g_s > 0:
+            note = "增速匹配/结构可接受"
+            status = "达标"
+            _paint_ok(cell_g, Font, PatternFill)
+            _paint_ok(cell_h, Font, PatternFill)
+        cell_st = ws.cell(row=r, column=5, value=status)
+        if status == "超标":
+            _paint_bad(cell_st, Font, PatternFill)
+        elif status == "达标":
+            _paint_ok(cell_st, Font, PatternFill)
+        ws.cell(row=r, column=6, value=note)
+        for c in range(1, 7):
+            _apply_border(ws.cell(row=r, column=c), Border, Side)
+
+    # ── 五、数据质量 / 跨年勾稽 / E3·E4 来源 ──
+    dq_start = sh + 6
+    ws.cell(row=dq_start, column=1, value="五、数据质量 · 跨年勾稽 · 税率/贡献率来源")
+    ws.cell(row=dq_start, column=1).font = Font(bold=True, size=12, color=navy)
+    ws.merge_cells(start_row=dq_start, start_column=1, end_row=dq_start, end_column=6)
+
+    dq = {}
+    cit_syn = {}
+    rec = {}
+    anomalies = []
+    if financial_data is not None:
+        meta = getattr(financial_data, "parsed_meta", None) or {}
+        dq = meta.get("data_quality") or {}
+        cit_syn = meta.get("cit_synthesis") or {}
+        rec = meta.get("reconciliation") or {}
+        anomalies = (meta.get("expense_anomalies") or {}).get("anomalies") or []
+
+    ti = plan.top_inputs
+    dq_rows = [
+        ("数据置信度", str(dq.get("confidence") or "—"), "high/medium/low；低置信度请人工核金额"),
+        (
+            "勾稽结果",
+            "通过" if rec.get("ok", True) and not rec.get("hard_fail") else "有失败/警告",
+            f"错误 {rec.get('error_count', len(rec.get('errors') or []))} · "
+            f"警告 {rec.get('warning_count', len(rec.get('warnings') or []))}",
+        ),
+        (
+            "E4 所得税税率（名义）",
+            float(ti.income_tax_rate or 0),
+            "高新默认 15%；与所得税贡献率 E3 分列",
+        ),
+        (
+            "E3 企业贡献率",
+            float(ti.company_contribution_rate or 0),
+            f"来源 {cit_syn.get('basis') or '—'}；"
+            f"WB中枢={(cit_syn.get('wb_hub') or 0)*100:.2f}% · "
+            f"历史有效={(cit_syn.get('latest_valid') or 0)*100:.2f}%",
+        ),
+        (
+            "E2 行业贡献率",
+            float(ti.industry_contribution_rate or 0),
+            "WB 行业所得税税负经验中枢",
+        ),
+        (
+            "费用增速模式",
+            str(lim.get("fee_growth_mode") or "raw_plus_buffer"),
+            "营收 |增速|>30% 时 winsor 降权",
+        ),
+        (
+            "无销售费用型",
+            "是" if lim.get("near_zero_selling") else "否",
+            "历史销售/营收极低时禁止虚增销售预算",
+        ),
+    ]
+    for i, (name, val, note) in enumerate(dq_rows):
+        r = dq_start + 1 + i
+        ws.cell(row=r, column=1, value=name)
+        cell_v = ws.cell(row=r, column=2, value=val)
+        if isinstance(val, float) and ("率" in name or "贡献" in name or "税率" in name):
+            cell_v.number_format = "0.00%"
+        ws.cell(row=r, column=3, value=note)
+        status = "—"
+        if name == "数据置信度":
+            if val == "high":
+                _paint_ok(cell_v, Font, PatternFill)
+                status = "可用"
+            elif val == "medium":
+                _paint_warn(cell_v, Font, PatternFill)
+                status = "关注"
+            elif val == "low":
+                _paint_bad(cell_v, Font, PatternFill)
+                status = "须核验"
+        elif name == "勾稽结果":
+            if "通过" in str(val):
+                _paint_ok(cell_v, Font, PatternFill)
+                status = "通过"
+            else:
+                _paint_bad(cell_v, Font, PatternFill)
+                status = "异常"
+        cell_st = ws.cell(row=r, column=4, value=status)
+        if status in ("可用", "通过"):
+            _paint_ok(cell_st, Font, PatternFill)
+        elif status in ("关注",):
+            _paint_warn(cell_st, Font, PatternFill)
+        elif status in ("须核验", "异常"):
+            _paint_bad(cell_st, Font, PatternFill)
+        for c in range(1, 5):
+            _apply_border(ws.cell(row=r, column=c), Border, Side)
+
+    # 勾稽/异常摘要行
+    warn_r = dq_start + 1 + len(dq_rows) + 1
+    warn_bits = list(rec.get("errors") or [])[:5] + list(rec.get("warnings") or [])[:5]
+    for a in anomalies[:5]:
+        warn_bits.append(a.get("message") or str(a))
+    ws.cell(row=warn_r, column=1, value="勾稽与费用异常摘要")
+    ws.cell(
+        row=warn_r,
+        column=2,
+        value="；".join(warn_bits) if warn_bits else "（无）",
+    )
+    ws.merge_cells(start_row=warn_r, start_column=2, end_row=warn_r, end_column=6)
+    ws.cell(row=warn_r, column=2).alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[warn_r].height = 48
+    for c in range(1, 7):
+        _apply_border(ws.cell(row=warn_r, column=c), Border, Side)
+
+    # ── 六、诊断风险摘要（若有互动会话）──
+    risk_start = warn_r + 2
+    ws.cell(row=risk_start, column=1, value="六、诊断风险摘要（低绿→中橙→高红，与系统诊断一致）")
+    ws.cell(row=risk_start, column=1).font = Font(bold=True, size=12, color=navy)
+    ws.merge_cells(start_row=risk_start, start_column=1, end_row=risk_start, end_column=6)
+
+    rh = risk_start + 1
+    for ci, h in enumerate(["风险等级", "类别", "发现标题", "事实摘要"], start=1):
+        cell = ws.cell(row=rh, column=ci, value=h)
+        _apply_header_style(cell, Font, PatternFill, Alignment)
+        _apply_border(cell, Border, Side)
+
+    findings = []
+    if session is not None and getattr(session, "diagnosis", None):
+        findings = list(getattr(session.diagnosis, "findings", None) or [])
+        try:
+            findings = compliance_mod.sort_findings_by_severity(findings)
+        except Exception:
+            pass
+    if findings:
+        label_map = {"低": "低风险", "中": "中风险", "高": "高风险"}
+        for i, f in enumerate(findings[:40]):
+            r = rh + 1 + i
+            sev = getattr(f, "severity", "") or ""
+            cell_sev = ws.cell(row=r, column=1, value=label_map.get(sev, sev))
+            if sev == "低":
+                _paint_ok(cell_sev, Font, PatternFill)
+            elif sev == "中":
+                _paint_warn(cell_sev, Font, PatternFill)
+            elif sev == "高":
+                _paint_bad(cell_sev, Font, PatternFill)
+            else:
+                cell_sev.font = Font(bold=True)
+            ws.cell(row=r, column=2, value=getattr(f, "category", "") or "")
+            ws.cell(row=r, column=3, value=getattr(f, "title", "") or "")
+            fact = str(getattr(f, "fact", "") or "")[:200]
+            ws.cell(row=r, column=4, value=fact)
+            for c in range(1, 5):
+                _apply_border(ws.cell(row=r, column=c), Border, Side)
+                ws.cell(row=r, column=c).alignment = Alignment(wrap_text=True, vertical="center")
+    else:
+        r = rh + 1
+        ws.cell(row=r, column=1, value="（本次导出未附带诊断会话；完成诊断互动后导出可在此显示风险清单）")
+        ws.cell(row=r, column=1).font = Font(italic=True, color="888888")
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+
+    tip = risk_start + 45
+    ws.cell(
+        row=tip,
+        column=1,
+        value=(
+            "免责声明：本表为内部合规对标与预算编制辅助，非税务机关法定标准；"
+            "重大涉税决策须结合专业机构与主管税务机关意见。"
+        ),
+    )
+    ws.cell(row=tip, column=1).font = Font(size=9, italic=True, color="888888")
+    ws.merge_cells(start_row=tip, start_column=1, end_row=tip, end_column=6)
+
+    widths = [28, 18, 18, 14, 14, 14, 14]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A4"
+    _apply_print_settings(ws, landscape=True, fit_width=1, repeat_rows="1:2")
 
 
 def _build_action_summary_sheet(

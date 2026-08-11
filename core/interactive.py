@@ -130,7 +130,14 @@ class Session:
 
 
 def start_session(data: FinancialData, diagnosis: DiagnosisResult) -> Session:
-    """启动互动会话：若有发现进入 FINDING_LOOP，否则直接 DRAFT2。"""
+    """启动互动会话：若有发现进入 FINDING_LOOP，否则直接 DRAFT2。
+
+    发现顺序：低风险（绿）→ 中风险（橙）→ 高风险（红），与诊断页一致。
+    """
+    from . import compliance_policy as compliance_mod
+
+    # 复制列表再排，避免外部持有旧顺序
+    diagnosis.findings = compliance_mod.sort_findings_by_severity(list(diagnosis.findings or []))
     sess = Session(data=data, diagnosis=diagnosis)
     if diagnosis.findings:
         sess.state = STATE_FINDING_LOOP

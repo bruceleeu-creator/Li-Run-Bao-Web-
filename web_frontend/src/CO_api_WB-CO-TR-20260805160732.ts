@@ -128,6 +128,26 @@ export async function importSample(): Promise<ImportResponse> {
   return request("/api/import/sample", { method: "POST" });
 }
 
+/** 一键载入案例包（manifest 驱动；id 或 alias，如 audit_yikang_3y / audit_3years） */
+export async function importCasePack(caseId = "audit_yikang_3y"): Promise<ImportResponse & { message?: string; case_id?: string }> {
+  return request(`/api/import/case/${encodeURIComponent(caseId)}`, { method: "POST" });
+}
+
+export async function listImportCases(): Promise<{
+  cases: Array<{
+    id: string;
+    label: string;
+    description: string;
+    files: string[];
+    company_name: string;
+    industry: string;
+    available: boolean;
+    location: string;
+  }>;
+}> {
+  return request("/api/import/cases");
+}
+
 export async function importFiles(
   files: File[],
   companyName: string,
@@ -260,6 +280,9 @@ export interface ExportStatus {
   feasibility_score?: number;
   state?: string;
   total_est_saving?: number;
+  data_quality?: import("./CO_types_WB-CO-TR-20260805160732").DataQuality;
+  policy?: import("./CO_types_WB-CO-TR-20260805160732").PolicySnapshot;
+  require_confirm?: boolean;
 }
 
 export async function fetchExportStatus(): Promise<ExportStatus> {
@@ -335,12 +358,35 @@ export interface BudgetExportJob {
     top_method?: string;
     line_method?: string;
     filled_lines?: number;
+    advice_applied?: boolean;
+    advice_selected?: number;
     notes?: string[];
   };
 }
 
-export async function startBudgetExportJob(): Promise<BudgetExportJob> {
-  return request("/api/export/budget/jobs", { method: "POST" });
+export async function startBudgetExportJob(
+  adviceItems?: BudgetAdviceItem[],
+): Promise<BudgetExportJob> {
+  const items = (adviceItems || [])
+    .filter((it) => it.selected !== false)
+    .map((it) => ({
+      row: it.row,
+      reference_amount: it.reference_amount,
+      budget_amount: it.budget_amount,
+      has_last_year: it.has_last_year,
+      last_year_actual: it.last_year_actual,
+      selected: true,
+      write_last_year: false,
+      subject: it.subject,
+      expense_name: it.expense_name,
+      invoice_name: it.invoice_name,
+      reason: it.reason,
+    }));
+  return request("/api/export/budget/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ advice_items: items }),
+  });
 }
 
 export async function fetchBudgetExportJob(jobId: string): Promise<BudgetExportJob> {
@@ -352,11 +398,63 @@ export async function fetchActiveBudgetExportJob(): Promise<BudgetExportJob | nu
   return body.job;
 }
 
-/** 异步生成费用预算三表并下载；onProgress 可选进度回调。 */
+/** 费用编制建议项 */
+export interface BudgetAdviceItem {
+  row: number;
+  subject: string;
+  expense_name: string;
+  invoice_name: string;
+  has_last_year: boolean;
+  last_year_actual: number;
+  reference_amount: number;
+  budget_amount: number;
+  budget_ratio: number;
+  budget_ratio_pct: number;
+  priority: "high" | "mid" | "low" | string;
+  reason: string;
+  source: string;
+  selected: boolean;
+  write_last_year: boolean;
+}
+
+export interface BudgetAdviceResponse {
+  company_name: string;
+  industry: string;
+  year: number;
+  budget_revenue: number;
+  expense_budget_cap: number;
+  allocated_before: number;
+  residual: number;
+  zero_lines: number;
+  suggestions: BudgetAdviceItem[];
+  algorithm_notes: string[];
+  ai_used: boolean;
+  ai_summary: string;
+  subject_mix: Record<string, number>;
+  suggestion_count: number;
+  selected_budget_total: number;
+  ai_error?: string;
+  plan_meta?: Record<string, unknown>;
+}
+
+/** 费用编制建议：后端强制 DeepSeek 全量介入（use_ai 固定 true） */
+export async function generateBudgetAdvice(_useAi = true): Promise<BudgetAdviceResponse> {
+  return request("/api/budget/advice", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ use_ai: true }),
+  });
+}
+
+/**
+ * 异步生成费用预算三表并下载。
+ * 推荐：先 generateBudgetAdvice，再传入勾选的 adviceItems，导出时自动填入。
+ */
 export async function downloadBudgetExportAsync(
   onProgress?: (job: BudgetExportJob) => void,
-): Promise<void> {
-  const started = await startBudgetExportJob();
+  adviceItems?: BudgetAdviceItem[],
+): Promise<BudgetExportJob> {
+  const started = await startBudgetExportJob(adviceItems);
   let job = started;
   onProgress?.(job);
   const deadline = Date.now() + 8 * 60 * 1000;
@@ -379,7 +477,7 @@ export async function downloadBudgetExportAsync(
         blob,
         filenameFromDisposition(cd, job.filename || "费用预算三表.xlsx"),
       );
-      return;
+      return job;
     }
     if (job.status === "failed") {
       throw new Error(job.error || job.message || "预算三表生成失败");
@@ -389,6 +487,13 @@ export async function downloadBudgetExportAsync(
     onProgress?.(job);
   }
   throw new Error("预算三表生成超时，请稍后在导出页重试");
+}
+
+/** @deprecated 使用 downloadBudgetExportAsync(onProgress, items) 即可自动填入 */
+export async function applyBudgetAdviceAndDownload(
+  items: BudgetAdviceItem[],
+): Promise<void> {
+  await downloadBudgetExportAsync(undefined, items);
 }
 
 export interface BudgetTopInputs {

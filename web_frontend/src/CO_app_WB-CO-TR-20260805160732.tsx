@@ -18,14 +18,18 @@ import {
   fetchYearsSummaryJob,
   importFiles,
   importSample,
+  importCasePack,
   identifyCompany,
   previewFiles,
   recommendIndustry,
   runDiagnosis,
   downloadExport,
   downloadBudgetExportAsync,
+  generateBudgetAdvice,
   fetchExportStatus,
   fastForwardInteraction,
+  type BudgetAdviceItem,
+  type BudgetAdviceResponse,
   saveAIConfig,
   startInteraction,
   startYearsSummaryJob,
@@ -37,6 +41,7 @@ import {
   type BudgetPlanResponse,
 } from "./CO_api_WB-CO-TR-20260805160732";
 import type {
+  DataQuality,
   DiagnosisResponse,
   ExportDeliverable,
   FilePreview,
@@ -45,10 +50,64 @@ import type {
   IndustryItem,
   IndustryRecommendResponse,
   InteractionState,
+  PolicySnapshot,
   SessionResponse,
   WorkflowStep,
   Workspace,
 } from "./CO_types_WB-CO-TR-20260805160732";
+
+/** 数据质量 / 税率政策条（导入与会话共用） */
+function QualityPolicyBanner({
+  quality,
+  policy,
+}: {
+  quality?: DataQuality | null;
+  policy?: PolicySnapshot | null;
+}) {
+  if (!quality && !policy) return null;
+  const conf = quality?.confidence || "—";
+  const confLabel =
+    conf === "high" ? "高" : conf === "medium" ? "中" : conf === "low" ? "低" : String(conf);
+  const rec = quality?.reconciliation;
+  const e4 = policy?.e4 ?? policy?.e4_income_tax_rate;
+  const e3 = policy?.e3 ?? policy?.e3_company_contribution;
+  const e2 = policy?.e2 ?? policy?.e2_industry_contribution;
+  const pct = (v?: number) =>
+    v == null || Number.isNaN(v) ? "—" : `${(Number(v) * 100).toFixed(2)}%`;
+  const warnCount =
+    (rec?.warning_count ?? rec?.warnings?.length ?? 0) +
+    (quality?.expense_anomalies?.length ?? 0);
+  const errCount = rec?.error_count ?? rec?.errors?.length ?? 0;
+  const tone =
+    conf === "low" || rec?.hard_fail || errCount > 0
+      ? "status--error"
+      : conf === "medium" || warnCount > 0
+        ? "status--warn"
+        : "status--ok";
+  return (
+    <div className={`status ${tone}`} style={{ marginTop: 8, marginBottom: 8 }} role="status">
+      <strong>数据质量</strong>
+      {" · 置信度 "}
+      <strong>{confLabel}</strong>
+      {rec?.ok === false || rec?.hard_fail
+        ? " · 勾稽异常"
+        : errCount > 0
+          ? ` · 勾稽错误 ${errCount}`
+          : " · 勾稽通过"}
+      {warnCount > 0 ? ` · 警告 ${warnCount}` : ""}
+      {quality?.require_confirm ? " · 建议人工核验后再导出" : ""}
+      {(e2 != null || e3 != null || e4 != null) && (
+        <>
+          <br />
+          <strong>政策</strong>
+          {` · E2 ${pct(e2)} · E3 ${pct(e3)}（${policy?.e3_basis || "—"}） · E4 ${pct(e4)}（${policy?.e4_source || "—"}）`}
+          {policy?.industry_key ? ` · 行业 ${policy.industry_key}` : ""}
+          {policy?.near_zero_selling ? " · 无销售费用型" : ""}
+        </>
+      )}
+    </div>
+  );
+}
 
 // ── 外壳数据（流程进度仍为模拟；指标与导入为真实 API 数据）──
 
@@ -186,7 +245,7 @@ const EXPORT_ITEMS: readonly ExportDeliverable[] = [
     name: "导出费用预算三表",
     format: "Excel",
     enabled: false,
-    note: "DeepSeek 填充 · 与标准 budget_3sheet 同构",
+    note: "先编制建议 → 导出时自动填入",
   },
 ] as const;
 
@@ -243,8 +302,21 @@ function isNumeric(cell: string): boolean {
   return /^[-+]?[¥￥$]?[\d][\d,]*(\.[\d]+)?%?$/.test(s);
 }
 
+/** 占比/费率展示：小比例加长小数，避免千元/数亿营收显示成 0.00% */
 function formatPercent(v: number): string {
-  return `${v.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}%`;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n === 0) return "0%";
+  const a = Math.abs(n);
+  const digits = a < 0.001 ? 4 : a < 0.01 ? 4 : a < 0.1 ? 3 : 2;
+  return `${n.toLocaleString("zh-CN", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}%`;
+}
+
+/** budget_ratio_pct 已是百分点（0.0008 表示 0.0008%） */
+function formatBudgetRatioPct(pct: number): string {
+  return formatPercent(Number(pct) || 0);
 }
 
 function MetricCardView({ name, ind }: { name: string; ind: { value: number; note: string; estimate: boolean } }) {
@@ -575,6 +647,40 @@ function OverviewPage({
     }
   };
 
+  /**
+   * 载入三年审计报告案例（测试文件 2022/2023/2024 PDF）。
+   * 与手动上传多份年报同一链路，任意企业报告亦可按同样方式导入分析。
+   */
+  const onLoadAuditCase = async () => {
+    setCaseBusy(true);
+    setCaseError("");
+    setCaseMsg("正在载入三年审计报告（DeepSeek 逐份解析，约 1–3 分钟）…");
+    try {
+      const resp = await importCasePack("audit_yikang_3y");
+      await onRefreshSession();
+      setCaseMsg("审计报告已导入，正在规则诊断…");
+      await runDiagnosis();
+      setCaseMsg("诊断完成，一键补全互动…");
+      const st = await fastForwardInteraction("A");
+      await onRefreshSession();
+      onCaseReady({
+        diagnosisDone: true,
+        interactionDone: true,
+        exportUnlocked: Boolean(st.is_export_unlocked),
+      });
+      const name = resp.summary?.company_name || "企业";
+      const years = (resp.years || []).join("/");
+      setCaseMsg(
+        resp.message
+          || `${name} · ${years} 案例已就绪（可诊断/互动/导出；其它年报请用「财报导入」多选上传）。`,
+      );
+    } catch (e) {
+      setCaseError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCaseBusy(false);
+    }
+  };
+
   return (
     <>
       <section className="panel">
@@ -640,9 +746,17 @@ function OverviewPage({
             type="button"
             className="btn btn--ai"
             disabled={caseBusy}
+            onClick={() => void onLoadAuditCase()}
+          >
+            {caseBusy ? "处理中…" : "载入演示案例（艺康三年审计）"}
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={caseBusy}
             onClick={() => void onLoadDemoCase()}
           >
-            载入示例完整案例
+            载入制造示例（JSON）
           </button>
           <button
             type="button"
@@ -653,6 +767,11 @@ function OverviewPage({
             去导出页
           </button>
         </div>
+        <p className="panel__note">
+          三年审计案例读取本地「2022/2023/2024年审计报告.pdf」（测试文件目录）。
+          <strong>其它企业审计报告</strong>：到「财报导入」多选每年一份 PDF（建议文件名含年份），
+          与本案例同一解析/诊断/导出链路。
+        </p>
         {caseMsg ? <p className="panel__note">{caseMsg}</p> : null}
         {caseError ? <div className="status status--error" role="alert">{caseError}</div> : null}
         {session.session ? (
@@ -662,8 +781,10 @@ function OverviewPage({
             {session.session.industry}
             {" · "}
             {(session.session.years || []).join(" / ") || "年份—"}
+            {session.session.matched != null ? ` · 命中科目 ${session.session.matched}` : ""}
           </p>
         ) : null}
+        <QualityPolicyBanner quality={session.data_quality} policy={session.policy} />
       </section>
       <section className="panel">
         <h2 className="panel__title">AI 合并报告</h2>
@@ -1588,6 +1709,19 @@ function BudgetPage() {
   );
 }
 
+// 风险等级 → 语义色 class：低风险绿色在上、中风险橙色居中、高风险红色在下
+const SEVERITY_CLASS: Record<string, string> = {
+  低: "finding--sev-low",
+  中: "finding--sev-med",
+  高: "finding--sev-high",
+};
+const SEVERITY_RANK: Record<string, number> = { 低: 0, 中: 1, 高: 2 };
+const severityClassOf = (severity: string) => SEVERITY_CLASS[severity] ?? "finding--sev-low";
+const sortFindings = <T extends { severity: string }>(items: T[]) =>
+  [...items].sort(
+    (a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9),
+  );
+
 function DiagnosisPage({
   session,
   onDiagnosisDone,
@@ -1747,12 +1881,17 @@ function DiagnosisPage({
               <div className="diag-vat-note">⚠ {diagnosis.vat_estimate_note}</div>
             ) : null}
 
+            <div className="diag-risk-legend" aria-label="风险等级图例">
+              <span className="diag-risk-legend__item diag-risk-legend__item--low">低风险 · 绿 · 上方</span>
+              <span className="diag-risk-legend__item diag-risk-legend__item--med">中风险 · 橙 · 中间</span>
+              <span className="diag-risk-legend__item diag-risk-legend__item--high">高风险 · 红 · 下方</span>
+            </div>
             <div className="finding-list">
-              {diagnosis.findings.map((f) => (
-                <article key={f.id} className={`finding finding--${f.category === "真实性风险" ? "risk" : f.severity === "高" ? "missing" : "excess"}`}>
+              {sortFindings(diagnosis.findings).map((f) => (
+                <article key={f.id} className={`finding ${severityClassOf(f.severity)}`}>
                   <div className="finding__head">
                     <span className="finding__tag">
-                      {f.category} · {severityLabel[f.severity] ?? f.severity}
+                      {severityLabel[f.severity] ?? f.severity} · {f.category}
                     </span>
                     {f.ai_enhanced ? <span className="est-tag">AI 增强</span> : null}
                     <button
@@ -1921,9 +2060,15 @@ function InteractionPage({
             <div className="interaction-progress">
               发现进度：{state.current_index != null ? state.current_index + 1 : "?"} / {state.total}
             </div>
-            <article className={`finding finding--${cur.category === "真实性风险" ? "risk" : cur.severity === "高" ? "missing" : "excess"}`}>
+            <article className={`finding ${severityClassOf(cur.severity)}`}>
               <div className="finding__head">
-                <span className="finding__tag">{cur.category} · 第 {state.current_index != null ? state.current_index + 1 : "?"} 条</span>
+                <span className="finding__tag">
+                  {{ 低: "低风险", 中: "中风险", 高: "高风险" }[cur.severity] ?? cur.severity}
+                  {" · "}
+                  {cur.category}
+                  {" · "}
+                  第 {state.current_index != null ? state.current_index + 1 : "?"} 条
+                </span>
               </div>
               <h3>{cur.title}</h3>
               <p><strong>事实：</strong>{cur.fact}</p>
@@ -2030,6 +2175,13 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
   const [error, setError] = useState("");
   const [statusNote, setStatusNote] = useState("");
   const [budgetProgress, setBudgetProgress] = useState("");
+  // 流程：先 DeepSeek 编制建议 → 再导出三表并自动填入
+  const [advice, setAdvice] = useState<BudgetAdviceResponse | null>(null);
+  const [adviceItems, setAdviceItems] = useState<BudgetAdviceItem[]>([]);
+  const [adviceBusy, setAdviceBusy] = useState(false);
+  const [adviceNote, setAdviceNote] = useState("");
+  const [requireConfirm, setRequireConfirm] = useState(false);
+  const [qualityAck, setQualityAck] = useState(false);
 
   useEffect(() => {
     if (!session.session) return;
@@ -2040,28 +2192,82 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
             `企业 ${s.company_name || "—"} · ${s.findings} 条发现 · ${s.decisions} 条决策`
             + (s.unlocked ? " · 已解锁" : ` · ${s.reason || "未解锁"}`),
           );
+          const need =
+            Boolean(s.require_confirm) ||
+            s.data_quality?.confidence === "low" ||
+            Boolean(session.data_quality?.require_confirm);
+          setRequireConfirm(need);
+          if (!need) setQualityAck(true);
         }
       })
       .catch(() => {
         /* ignore */
       });
-  }, [session.session, unlocked]);
+  }, [session.session, session.data_quality, unlocked]);
+
+  const loadAdvice = async () => {
+    setAdviceBusy(true);
+    setError("");
+    setAdviceNote("DeepSeek 全量编制中（按销售/管理/财务等科目分批）…");
+    try {
+      const resp = await generateBudgetAdvice(true);
+      setAdvice(resp);
+      setAdviceItems(resp.suggestions.map((s) => ({ ...s, selected: s.selected !== false })));
+      setAdviceNote(
+        resp.ai_summary
+          ? `建议已就绪，请勾选后点「导出费用预算三表」自动填入。${resp.ai_summary}`
+          : `DeepSeek 已给出 ${resp.suggestion_count || resp.suggestions?.length || 0} 条建议，勾选后即可导出填入。`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setAdviceNote("需要已配置 DeepSeek。请到「设置」填写 API Key 后重试。");
+    } finally {
+      setAdviceBusy(false);
+    }
+  };
+
+  const selectedCount = adviceItems.filter((i) => i.selected).length;
+  const selectedSum = adviceItems
+    .filter((i) => i.selected)
+    .reduce((a, b) => a + (Number(b.budget_amount) || 0), 0);
 
   const onExport = (kind: "word" | "pdf" | "excel" | "budget") => {
     // 预算三表：导入后即可导出；其余需解锁
     if (kind !== "budget" && !unlocked) return;
     if (busyKind) return;
+    if (requireConfirm && !qualityAck) {
+      setError("数据置信度偏低或勾稽有警告：请勾选「已人工核验关键金额」后再导出。");
+      return;
+    }
+    if (kind === "budget") {
+      const picked = adviceItems.filter((i) => i.selected);
+      if (!advice || picked.length === 0) {
+        setError("请先完成「费用编制建议」并勾选要填入的费用项，再导出预算三表。");
+        // 滚到建议区
+        document.getElementById("budget-advice")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+    }
     setBusyKind(kind);
     setError("");
     setBudgetProgress("");
     void (async () => {
       try {
         if (kind === "budget") {
+          const picked = adviceItems.filter((i) => i.selected);
+          setBudgetProgress(`将把 ${picked.length} 条编制建议自动填入后导出…`);
           await downloadBudgetExportAsync((job) => {
             const pct = typeof job.progress === "number" ? `${job.progress}%` : "";
             const filled = job.meta?.filled_lines != null ? ` · 已填 ${job.meta.filled_lines}/84 行` : "";
-            setBudgetProgress(`${job.stage || ""} ${pct} ${job.message || ""}${filled}`.trim());
-          });
+            const adv =
+              job.meta?.advice_applied
+                ? ` · 建议已填入 ${job.meta.advice_selected ?? picked.length} 项`
+                : "";
+            setBudgetProgress(`${job.stage || ""} ${pct} ${job.message || ""}${filled}${adv}`.trim());
+          }, picked);
+          setAdviceNote(
+            `已导出费用预算三表：DeepSeek 建议 ${picked.length} 项已自动写入参考金额/预算/占比。`,
+          );
         } else {
           await downloadExport(kind);
         }
@@ -2081,6 +2287,26 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
     return null;
   };
 
+  const toggleItem = (row: number) => {
+    setAdviceItems((list) =>
+      list.map((it) => (it.row === row ? { ...it, selected: !it.selected } : it)),
+    );
+  };
+
+  const selectAll = (on: boolean) => {
+    setAdviceItems((list) => list.map((it) => ({ ...it, selected: on })));
+  };
+
+  /** 一键：用当前勾选直接导出三表（等同点导出卡片） */
+  const onExportWithAdvice = () => {
+    onExport("budget");
+  };
+
+  const fmtYuan = (n: number) =>
+    Number(n || 0).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
+
+  const budgetReady = Boolean(advice && selectedCount > 0);
+
   return (
     <section className="panel">
       <h2 className="panel__title">第二稿与导出</h2>
@@ -2091,11 +2317,24 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
         <p className="panel__note">尚未导入财报。请先完成导入、诊断与互动，再导出。</p>
       ) : (
         <>
+          <QualityPolicyBanner quality={session.data_quality} policy={session.policy} />
+          {requireConfirm ? (
+            <label className="field" style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 12 }}>
+              <input
+                type="checkbox"
+                checked={qualityAck}
+                onChange={(e) => setQualityAck(e.target.checked)}
+              />
+              <span className="field__label">
+                已人工核验关键金额（营收/成本/净利/所得税）；数据置信度偏低或勾稽有警告时必须勾选后才能导出
+              </span>
+            </label>
+          ) : null}
           {unlocked ? (
             <div className="ai-config__status is-on">● 报告/测算导出已解锁（互动已确认）</div>
           ) : (
             <div className="status status--warn">
-              导出未解锁时：可点下方「一键补全互动解锁」（沿用已有诊断，无需重做导入/诊断）；预算三表导入后即可导出。
+              导出未解锁时：可点下方「一键补全互动解锁」（沿用已有诊断，无需重做导入/诊断）；预算三表建议先完成编制建议。
               <div className="ai-actions" style={{ marginTop: 8 }}>
                 <button
                   type="button"
@@ -2139,24 +2378,156 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
             </div>
           ) : null}
           {error ? <div className="status status--error" role="alert">{error}</div> : null}
+
+          {/* ① 费用编制建议 — 必须在导出预算三表之前 */}
+          <div className="advice-panel" id="budget-advice">
+            <h3 className="advice-panel__title">① 费用编制建议 · DeepSeek 全量（先做这一步）</h3>
+            <p className="panel__note">
+              <strong>分工：</strong>DeepSeek 在本页完成「开支预算 / 未来预期 / 参考与预算金额」分析填入
+              （无上年不编造上年）；导出时<strong>不再二次调用 DeepSeek</strong>。
+              毛利率、费用占比等由 <strong>WB 建模</strong>计算。
+              <strong>编制时强制执行：</strong>
+              ①历史费用占营收对标；②金税四期合规下评估收入上涨后费用可筹划范围；
+              ③费用增幅匹配营收增速、落在行业区间，杜绝涉税风险（金额有硬顶）。
+            </p>
+            <div className="ai-actions">
+              <button
+                type="button"
+                className="btn btn--ai"
+                disabled={adviceBusy || busyKind !== null || !session.session}
+                onClick={() => void loadAdvice()}
+              >
+                {adviceBusy ? "DeepSeek 编制中…" : advice ? "重新生成编制建议" : "生成费用编制建议"}
+              </button>
+              {adviceItems.length > 0 ? (
+                <>
+                  <button type="button" className="btn btn--ghost" disabled={adviceBusy} onClick={() => selectAll(true)}>
+                    全选
+                  </button>
+                  <button type="button" className="btn btn--ghost" disabled={adviceBusy} onClick={() => selectAll(false)}>
+                    全不选
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    disabled={adviceBusy || busyKind !== null || selectedCount === 0}
+                    onClick={onExportWithAdvice}
+                  >
+                    {busyKind === "budget"
+                      ? "导出填入中…"
+                      : `② 导出费用预算三表（自动填入 ${selectedCount} 项）`}
+                  </button>
+                </>
+              ) : null}
+            </div>
+            {adviceNote ? <p className="panel__note">{adviceNote}</p> : null}
+            {advice ? (
+              <>
+                <div className="diag-summary" style={{ marginBottom: 12 }}>
+                  <div className="diag-metric">
+                    <span className="diag-metric__label">费用上限 E7</span>
+                    <strong className="diag-metric__value">{fmtYuan(advice.expense_budget_cap)}</strong>
+                  </div>
+                  <div className="diag-metric">
+                    <span className="diag-metric__label">已分配</span>
+                    <strong className="diag-metric__value">{fmtYuan(advice.allocated_before)}</strong>
+                  </div>
+                  <div className="diag-metric">
+                    <span className="diag-metric__label">可补 residual</span>
+                    <strong className="diag-metric__value">{fmtYuan(advice.residual)}</strong>
+                  </div>
+                  <div className="diag-metric">
+                    <span className="diag-metric__label">空白行</span>
+                    <strong className="diag-metric__value">{advice.zero_lines}</strong>
+                  </div>
+                  <div className="diag-metric">
+                    <span className="diag-metric__label">勾选预算合计</span>
+                    <strong className="diag-metric__value">{fmtYuan(selectedSum)}</strong>
+                  </div>
+                </div>
+                {advice.ai_summary ? (
+                  <div className="status status--info" role="status">
+                    DeepSeek：{advice.ai_summary}
+                  </div>
+                ) : null}
+                <div className="advice-list">
+                  {adviceItems.map((it) => (
+                    <label key={it.row} className={`advice-item advice-item--${it.priority}`}>
+                      <input
+                        type="checkbox"
+                        checked={it.selected}
+                        onChange={() => toggleItem(it.row)}
+                      />
+                      <div className="advice-item__body">
+                        <div className="advice-item__head">
+                          <strong>
+                            R{it.row} · {it.subject} / {it.expense_name}
+                          </strong>
+                          <span className="advice-item__tag">{it.invoice_name}</span>
+                          <span className="advice-item__prio">{it.priority}</span>
+                          {!it.has_last_year ? (
+                            <span className="advice-item__tag advice-item__tag--warn">无上年·只写参考/预算</span>
+                          ) : (
+                            <span className="advice-item__tag">有上年</span>
+                          )}
+                        </div>
+                        <div className="advice-item__nums">
+                          <span>参考 F {fmtYuan(it.reference_amount)} 元</span>
+                          <span>预算 G {fmtYuan(it.budget_amount)} 元</span>
+                          <span>占比 H {formatBudgetRatioPct(Number(it.budget_ratio_pct || 0))}</span>
+                        </div>
+                        <p className="advice-item__reason">{it.reason}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                {advice.algorithm_notes?.length ? (
+                  <details className="advice-notes">
+                    <summary>算法说明</summary>
+                    <ul>
+                      {advice.algorithm_notes.map((n, i) => (
+                        <li key={i}>{n}</li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
+              </>
+            ) : (
+              <p className="panel__note">
+                请先点「生成费用编制建议」。完成勾选后，再导出费用预算三表，内容会自动填入。
+              </p>
+            )}
+          </div>
+
+          {/* ② 其他交付物 + 预算三表卡片 */}
+          <h3 className="panel__title" style={{ marginTop: 20, fontSize: 15 }}>
+            ② 导出交付物
+          </h3>
+          <p className="panel__note">
+            费用预算三表：须先完成上方编制建议；导出只写入金额并套用公式模型（占比/毛利表内算）。
+            {budgetReady
+              ? ` 当前已勾选 ${selectedCount} 项，可直接导出。`
+              : " 当前尚未勾选建议项。"}
+          </p>
           <div className="export-grid">
             {EXPORT_ITEMS.map((item) => {
               const kind = kindOf(item.id);
               const busy = kind !== null && busyKind === kind;
-              const enabled = kind === "budget" ? true : unlocked;
+              const enabled =
+                kind === "budget" ? budgetReady && !adviceBusy : unlocked;
               return (
                 <button
                   key={item.id}
                   type="button"
                   className={enabled ? "export-card export-card--enabled" : "export-card"}
-                  disabled={busy || !kind || !enabled}
+                  disabled={busy || !kind || !enabled || adviceBusy}
                   onClick={() => kind && onExport(kind)}
                 >
                   <span className="export-card__format">{item.format}</span>
                   <strong>
                     {busy
                       ? kind === "budget"
-                        ? "DeepSeek 提取中…"
+                        ? "填入建议并导出中…"
                         : "生成中…"
                       : item.name}
                   </strong>
@@ -2168,17 +2539,15 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
                         : kind === "excel"
                           ? "成本优化测算模型（可逐月跟踪）"
                           : kind === "budget"
-                            ? "异步：DeepSeek 多片段提取 + 规则补齐 · 标准三 Sheet"
+                            ? budgetReady
+                              ? `自动填入已勾选 ${selectedCount} 条 DeepSeek 建议`
+                              : "请先完成①费用编制建议并勾选"
                             : item.note ?? ""}
                   </span>
                 </button>
               );
             })}
           </div>
-          <p className="panel__note">
-            费用预算三表格式与标准模板一致（费用预算表 / 行业企业所得税贡献率参考 / 诊断与行动清单）。
-            配置 DeepSeek 后自动识别营收成本并分配费用行；未配置时用规则映射。
-          </p>
         </>
       )}
     </section>
@@ -2439,7 +2808,13 @@ export function App() {
   const handleImported = (resp: ImportResponse) => {
     reportAdmissionRef.current = false;
     invalidateReportRequest();
-    setSession({ session: resp.summary, indicators: resp.indicators, years: resp.years });
+    setSession({
+      session: resp.summary,
+      indicators: resp.indicators,
+      years: resp.years,
+      data_quality: resp.data_quality,
+      policy: resp.policy,
+    });
     setAiReport("");
     setAiError("");
     setAiJob(null);
@@ -2482,7 +2857,7 @@ export function App() {
     }
     // 清空请求等待期间可能仍有旧网络响应；完成/失败后再次推进 epoch。
     invalidateReportRequest();
-    setSession({ session: null, indicators: [], years: [] });
+    setSession({ session: null, indicators: [], years: [], data_quality: {}, policy: {} });
     setAiReport("");
     setAiError("");
     setAiJob(null);

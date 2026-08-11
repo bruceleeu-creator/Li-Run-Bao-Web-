@@ -368,3 +368,209 @@ def recommend_by_rule(company_name: str, overview: str = "") -> Tuple[str, str]:
         if any(kw in text for kw in keywords):
             return industry, f"企业名称包含「{next(k for k in keywords if k in text)}」，按规则匹配为{industry}（可修改）"
     return DEFAULT_INDUSTRY, f"未匹配到明确关键词，默认推荐{DEFAULT_INDUSTRY}（可修改）"
+
+
+# ── WB 文档 §七 预算编制参考逻辑 ─────────────────────────────────────
+# 净利率预算 ≈ 毛利率预算 − 行业平均费用率
+# → 期间费用率 ≈ 毛利率 − 净利率
+# 文档明示：制造业费用率约 15~20%，零售业约 20~25%，软件业约 30~40%
+_NARRATIVE_FEE_RATE_PCT: Dict[str, Tuple[float, float]] = {
+    "制造业": (15.0, 20.0),
+    "医药制造业": (15.0, 25.0),
+    "批发零售业": (20.0, 25.0),
+    "软件和信息技术服务业": (30.0, 40.0),
+    "建筑业": (8.0, 12.0),
+    "房地产业": (8.0, 15.0),
+    "服务业": (25.0, 40.0),
+    "住宿餐饮业": (25.0, 45.0),
+    "交通运输业": (10.0, 18.0),
+    "电力热力生产供应业": (10.0, 18.0),
+}
+
+
+def resolve_industry_key(industry: str) -> str:
+    """把自由文本行业名映射到应用层行业键（装饰/装修→建筑业等）。"""
+    text = (industry or "").strip()
+    if not text:
+        return DEFAULT_INDUSTRY
+    if text in INDUSTRY_BENCHMARKS:
+        return text
+    if text in INDUSTRY_REFERENCE_DB:
+        for app, names in _APP_REF_MAP.items():
+            if text in names:
+                return app
+        if "制造" in text:
+            return "制造业"
+        if text == "软件与信息技术服务业":
+            return "软件和信息技术服务业"
+        return DEFAULT_INDUSTRY
+    for keywords, ind in INDUSTRY_RULE_KEYWORDS:
+        if any(k in text for k in keywords):
+            return ind
+    name, _ = recommend_by_rule(text)
+    return name
+
+
+def get_period_expense_ratio_band(industry: str) -> Dict[str, float]:
+    """期间费用率（销+管+研+财）/营收 合理带，单位为小数（0.12=12%）。
+
+    依据 WB §七：费用率 ≈ 毛利率预算 − 净利率预算；并与文档叙述区间取覆盖。
+    """
+    key = resolve_industry_key(industry)
+    bench, _ = get_benchmark(key)
+    gm = bench.get("gross_margin") or {}
+    nm = bench.get("net_margin") or {}
+    gm_lo = float(gm.get("budget_min") or gm.get("min") or 0)
+    gm_hi = float(gm.get("budget_max") or gm.get("max") or 0)
+    nm_lo = float(nm.get("budget_min") or nm.get("min") or 0)
+    nm_hi = float(nm.get("budget_max") or nm.get("max") or 0)
+    gm_med = float(gm.get("median") or ((gm_lo + gm_hi) / 2 if (gm_lo or gm_hi) else 0))
+    nm_med = float(nm.get("median") or ((nm_lo + nm_hi) / 2 if (nm_lo or nm_hi) else 0))
+    fee_from_budget_lo = max(0.0, gm_lo - nm_hi)
+    fee_from_budget_hi = max(0.0, gm_hi - nm_lo)
+    fee_median = max(0.0, gm_med - nm_med)
+    n_lo, n_hi = _NARRATIVE_FEE_RATE_PCT.get(
+        key, (max(fee_median * 0.85, 8.0), max(fee_median * 1.25, 15.0) if fee_median else (12.0, 18.0))
+    )
+    band_min = min(fee_from_budget_lo if fee_from_budget_lo > 0 else n_lo, n_lo)
+    band_max = max(fee_from_budget_hi if fee_from_budget_hi > 0 else n_hi, n_hi)
+    if band_max < band_min:
+        band_min, band_max = band_max, band_min
+    if fee_median <= 0:
+        fee_median = (band_min + band_max) / 2
+    fee_median = min(max(fee_median, band_min), band_max)
+    return {
+        "min": round(band_min / 100.0, 6),
+        "max": round(band_max / 100.0, 6),
+        "median": round(fee_median / 100.0, 6),
+        "budget_min": round(max(band_min, fee_from_budget_lo or band_min) / 100.0, 6),
+        "budget_max": round(min(band_max, fee_from_budget_hi or band_max) / 100.0, 6),
+        "source": "WB-20260807§七 毛利率−净利率 + 行业费用率叙述",
+        "industry_key": key,
+    }
+
+
+def get_income_tax_contribution_rate(industry: str, *, mode: str = "hub") -> float:
+    """企业预算所得税贡献率 E3（小数）。
+
+    WB §七：税负率预算下限 = 行业经验中枢（合规红线，不得低于）。
+    mode: hub | budget_mid | budget_floor
+    """
+    key = resolve_industry_key(industry)
+    cit = get_range(key, "income_tax_rate")
+    if mode == "budget_mid":
+        lo = float(cit.get("budget_min") or cit.get("median") or 0)
+        hi = float(cit.get("budget_max") or cit.get("median") or 0)
+        pct = (lo + hi) / 2 if (lo or hi) else float(cit.get("median") or 1.5)
+    elif mode == "budget_floor":
+        pct = float(cit.get("budget_min") or cit.get("median") or 1.5)
+    else:
+        pct = float(cit.get("median") or 1.5)
+    return round(pct / 100.0, 6)
+
+
+def get_industry_vat_hub(industry: str) -> float:
+    """增值税税负经验中枢（小数）。"""
+    key = resolve_industry_key(industry)
+    vat = get_range(key, "vat_tax_rate")
+    return round(float(vat.get("median") or 3.0) / 100.0, 6)
+
+
+def apply_historical_contribution_to_plan(plan, data, *, force: bool = False) -> list:
+    """E3 = max(WB 中枢, 最近有效历史所得税/营收)；写入 plan.top_inputs。
+
+    负所得税年份已在 historical_cit_rates 中剔除。
+    """
+    notes: list = []
+    if data is None:
+        return notes
+    try:
+        from . import reconciliation as recon_mod
+    except Exception:
+        return notes
+    industry = getattr(plan, "industry", "") or getattr(data, "industry", "") or DEFAULT_INDUSTRY
+    syn = recon_mod.synthesize_company_contribution(data, industry)
+    e3 = float(syn.get("company_contribution_rate") or 0)
+    if e3 <= 0:
+        return notes
+    ti = plan.top_inputs
+    old = float(getattr(ti, "company_contribution_rate", 0) or 0)
+    hub = float(syn.get("wb_hub") or 0)
+    # 默认覆盖模板占位；force 或当前低于合成值时抬升（守合规红线）
+    if force or old in (0.0, 0.003) or old < e3 - 1e-9:
+        ti.company_contribution_rate = e3
+        basis = syn.get("basis") or ""
+        latest = syn.get("latest_valid")
+        notes.append(
+            f"E3 企业贡献率 ← max(WB中枢 {hub*100:.2f}%, 历史有效)"
+            f"={e3*100:.2f}%（basis={basis}"
+            + (f", latest={latest*100:.2f}%" if latest is not None else "")
+            + f"；原 {old*100:.2f}%）"
+        )
+    # E2 同步中枢（若仍为占位）
+    old_e2 = float(getattr(ti, "industry_contribution_rate", 0) or 0)
+    if force or old_e2 in (0.0, 0.003) or (hub > 0 and old_e2 < hub * 0.5):
+        ti.industry_contribution_rate = hub
+        notes.append(f"E2 行业贡献率 ← WB 中枢 {hub*100:.2f}%")
+    return notes
+
+
+def apply_wb_top_rates_to_plan(plan, *, force: bool = False) -> list:
+    """把 WB 基准写入预算顶栏 E2/E3（所得税贡献率）。
+
+    E2/E3 = 行业所得税税负经验中枢（合规红线，§七）；模板默认 0.30% 视为未核验并覆盖。
+
+    模板关系：E5=E3×C2，E6=E5/E4，E7=C4−E6。
+    项目默认 E4=15%（高新）。若仍为小微 5% 而 E3 用行业实缴/营收中枢，
+    则 E6=中枢/5% 会虚高导致 E7 为负：仅在 E4<15% 时将倒推税率调到 15%（高新口径），
+    不再默认抬到 25%。若 15% 下 E7 仍不足，则按毛利约束下调 E3（不抬高 E4）。
+    """
+    notes: list = []
+    industry = getattr(plan, "industry", "") or DEFAULT_INDUSTRY
+    ti = plan.top_inputs
+    hub = get_income_tax_contribution_rate(industry, mode="hub")
+    defaultish = {0.0, 0.003}
+    old_e2 = float(getattr(ti, "industry_contribution_rate", 0) or 0)
+    old_e3 = float(getattr(ti, "company_contribution_rate", 0) or 0)
+    if force or old_e2 in defaultish or (hub > 0 and old_e2 < hub * 0.5):
+        ti.industry_contribution_rate = hub
+        if hasattr(ti, "industry_rate_source"):
+            ti.industry_rate_source = "WB-行业基准数据库-20260807 所得税税负经验中枢"
+        if hasattr(ti, "industry_rate_verified"):
+            ti.industry_rate_verified = True
+        notes.append(f"E2 行业所得税贡献率 ← WB 中枢 {hub*100:.2f}%（原 {old_e2*100:.2f}%）")
+    if force or old_e3 in defaultish or (hub > 0 and old_e3 < hub * 0.5):
+        ti.company_contribution_rate = hub
+        notes.append(f"E3 企业预算所得税贡献率 ← WB 合规红线/中枢 {hub*100:.2f}%（原 {old_e3*100:.2f}%）")
+
+    # E7 保护：倒推税率与费用率下限兼容（默认高新 15%，不擅自抬到 25%）
+    c2 = float(getattr(ti, "budget_revenue", 0) or 0)
+    c3 = float(getattr(ti, "budget_cost", 0) or 0)
+    e3 = float(getattr(ti, "company_contribution_rate", 0) or 0)
+    e4 = float(getattr(ti, "income_tax_rate", 0) or 0)
+    if c2 > 0 and e3 > 0 and e4 > 0:
+        c4 = c2 - c3
+        e5 = e3 * c2
+        e6 = e5 / e4
+        e7 = c4 - e6
+        fee_min = float(get_period_expense_ratio_band(industry).get("min") or 0.08)
+        need_e7 = c2 * fee_min * 0.5  # 至少半档费用空间
+        if e7 < need_e7 and e4 < 0.15:
+            old_e4 = e4
+            ti.income_tax_rate = 0.15
+            e4 = 0.15
+            e6 = e5 / e4
+            e7 = c4 - e6
+            notes.append(
+                f"E4 预算倒推税率 {old_e4*100:.0f}%→15%（高新默认口径；避免中枢/{old_e4*100:.0f}% "
+                f"虚高利润总额挤占 E7；小微 5% 与预算倒推分列，可手动改回）"
+            )
+        if e7 < need_e7:
+            # 15%/25% 下仍不足：按毛利约束下调 E3，不抬高税率
+            e3_cap = max((c4 / c2) * e4 * 0.85, hub * 0.6) if c2 else hub
+            if e3 > e3_cap > 0:
+                ti.company_contribution_rate = round(e3_cap, 6)
+                notes.append(
+                    f"E3 受毛利约束下调至 {e3_cap*100:.2f}%（保证 E7 费用空间且接近 WB 中枢）"
+                )
+    return notes

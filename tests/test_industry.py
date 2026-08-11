@@ -56,3 +56,36 @@ def test_unknown_industry_falls_back_to_manufacturing():
     assert fallback is True
     assert bench is ind.get_benchmark("制造业")[0]
     assert bench["vat_tax_rate"]["median"] == 3.5
+
+
+def test_wb_section7_fee_band_and_cit_hub():
+    """§七：费用率≈毛利−净利；所得税贡献率=税负中枢（建筑 1.5%）。"""
+    assert ind.resolve_industry_key("装饰工程") == "建筑业"
+    assert ind.resolve_industry_key("建筑业") == "建筑业"
+    cit = ind.get_income_tax_contribution_rate("建筑业", mode="hub")
+    assert abs(cit - 0.015) < 1e-6
+    band = ind.get_period_expense_ratio_band("建筑业")
+    # 建筑毛利 10–13、净利 1.5–3 → 费用约 8–12%
+    assert band["min"] >= 0.07
+    assert band["max"] <= 0.15
+    assert band["min"] < band["median"] <= band["max"]
+    mfg = ind.get_period_expense_ratio_band("制造业")
+    assert mfg["min"] >= 0.12  # 叙述 15–20 与 GM-NM 并集
+    assert mfg["max"] >= 0.18
+
+
+def test_apply_wb_top_rates_overwrites_template_default():
+    from core import budget as bk
+
+    plan = bk.make_empty_plan(company_name="某某装饰", industry="建筑业", year=2024)
+    plan.top_inputs.budget_revenue = 100_000_000
+    plan.top_inputs.budget_cost = 80_000_000  # 毛利率 20%
+    plan.top_inputs.income_tax_rate = 0.05
+    assert abs(plan.top_inputs.company_contribution_rate - 0.003) < 1e-9
+    notes = ind.apply_wb_top_rates_to_plan(plan)
+    assert abs(plan.top_inputs.industry_contribution_rate - 0.015) < 1e-6
+    # 小微 5% + 中枢 1.5% 会炸 E7 → 倒推税率升至高新默认 15%（不再抬到 25%）
+    assert plan.top_inputs.income_tax_rate == 0.15
+    bk.compute_all(plan)
+    assert plan.top_computed.expense_budget_cap > 0
+    assert any("E3" in n or "E4" in n for n in notes)

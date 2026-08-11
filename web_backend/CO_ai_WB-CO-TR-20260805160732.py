@@ -180,13 +180,19 @@ def summarize_for_markdown(content: str) -> tuple[str, str]:
     chunks = _extract_ocr_chunks(content)
     if len(chunks) <= 1:
         # 单份文件/单段文本：直接整理（输入不大，单次调用足够）
+        from core import compliance_policy as compliance_mod
+
         system_prompt = (
             "你是企业财报整理助手。根据用户提供的财报原始内容（可能是表格提取文本或"
             "页面文字），整理为结构清晰、合法的中文 markdown 报告："
             "1. 有表格数据时输出 markdown 表格（含表头），数字保留原值；"
             "2. 有文字段落时输出要点化的 markdown 列表；"
             "3. 只整理呈现，不推断、不虚构数据，不改变事实；"
-            "4. 禁止任何违规税务筹划表述。"
+            "4. 禁止任何违规税务筹划表述；"
+            "5. 在「经营与费用要点」中必须穿插："
+            "历史成本费用占营收比例对标、收入变化下费用可筹划空间（合法合规/金税四期）、"
+            "费用增幅是否匹配营收增速的提示（仅基于原文数字，禁止编造）。\n"
+            + compliance_mod.HARD_RULES_BLOCK
         )
         try:
             return engine.chat(content, system_prompt=system_prompt, max_tokens=16_384), ""
@@ -303,16 +309,23 @@ def _stage_merge(engine, extracts: list[dict]) -> str:
         f"[{e['name'] or f'第{i+1}年'}年度总结]\n{e['summary']}"
         for i, e in enumerate(extracts)
     )
+    from core import compliance_policy as compliance_mod
+
     prompt = (
         "以下是多份不同年份审计报告的年度总结。请生成最终的跨年对比综合分析报告，"
         "结构如下：\n"
         "1. **企业概况**：企业名称、报告年度范围；\n"
         "2. **逐年关键指标表**：用 markdown 表格逐年对比（营业收入、营业成本、净利润、"
-        "毛利率、净利率、增值税税负率），表头含年份列；\n"
+        "毛利率、净利率、增值税税负率、期间费用率），表头含年份列；\n"
         "3. **逐年要点**：每个年度单独一个小节（该年关键事件、异常、趋势线索）；\n"
         "4. **跨年趋势与异常**：用要点列出逐年变化趋势与值得关注的异常；\n"
-        "5. 若某年数据缺失，标注「该年数据缺失」。\n"
-        "禁止违规税务筹划表述，只基于给定总结。\n\n"
+        "5. **费用合规对标（必须）**：历史成本费用占营收比例对标；"
+        "收入上涨后费用可筹划空间（合法合规/金税四期）；"
+        "费用增幅是否匹配营收增速（仅基于给定数字）；\n"
+        "6. 若某年数据缺失，标注「该年数据缺失」。\n"
+        "禁止违规税务筹划表述，只基于给定总结。\n"
+        + compliance_mod.HARD_RULES_BLOCK
+        + "\n\n"
         + joined
     )
     return engine.chat(prompt, system_prompt="", max_tokens=16_384)
@@ -367,13 +380,19 @@ def summarize_for_markdown(content: str) -> tuple[str, str]:
     chunks = _extract_ocr_chunks(content)
     if len(chunks) <= 1:
         # 单份文件/单段文本：输入量可控，单次整理即可
+        from core import compliance_policy as compliance_mod
+
         system_prompt = (
             "你是企业财报整理助手。根据用户提供的财报原始内容（可能是表格提取文本或"
             "页面文字），整理为结构清晰、合法的中文 markdown 报告："
             "1. 有表格数据时输出 markdown 表格（含表头），数字保留原值；"
             "2. 有文字段落时输出要点化的 markdown 列表；"
             "3. 只整理呈现，不推断、不虚构数据，不改变事实；"
-            "4. 禁止任何违规税务筹划表述。"
+            "4. 禁止任何违规税务筹划表述；"
+            "5. 在「经营与费用要点」中必须穿插："
+            "历史成本费用占营收比例对标、收入变化下费用可筹划空间（合法合规/金税四期）、"
+            "费用增幅是否匹配营收增速的提示（仅基于原文数字，禁止编造）。\n"
+            + compliance_mod.HARD_RULES_BLOCK
         )
         try:
             return engine.chat(content, system_prompt=system_prompt, max_tokens=16_384), ""
@@ -1768,3 +1787,563 @@ def extract_budget_expense_lines(
             if val > float(cur.get(key) or 0):
                 cur[key] = round(val, 2)
     return list(merged_by_row.values()), ""
+
+
+def _normalize_ratio_amount_item(
+    it: dict,
+    *,
+    revenue: float,
+    valid_rows: set[int] | None = None,
+) -> dict | None:
+    """单行占比/金额恒等：G = C2 × ratio_pct/100；ratio 与金额互推。"""
+    if not isinstance(it, dict):
+        return None
+    try:
+        row = int(it.get("row"))
+    except (TypeError, ValueError):
+        return None
+    if valid_rows is not None and row not in valid_rows:
+        return None
+    try:
+        ratio_pct = float(it.get("budget_ratio_pct") or 0)
+    except (TypeError, ValueError):
+        ratio_pct = 0.0
+    try:
+        amt = float(it.get("budget_amount") or 0)
+    except (TypeError, ValueError):
+        amt = 0.0
+    # 单位纠偏：若模型把 0.35% 误写成 35（或 0.0035 小数），按量级纠正
+    if ratio_pct > 0 and revenue > 0:
+        if ratio_pct > 30:  # 单行 30%+ 几乎不可能 → 可能把 0.35 写成 35
+            ratio_pct = ratio_pct / 100.0
+        elif ratio_pct < 0.0001 and amt > 0:
+            # 小数费率 0.0035 误当 pct
+            ratio_pct = ratio_pct * 100.0
+    # 恒等：有占比以占比推金额；仅有金额则反推占比
+    if ratio_pct > 0 and revenue > 0:
+        amt = round(revenue * ratio_pct / 100.0, 2)
+    elif amt > 0 and revenue > 0:
+        ratio_pct = round(amt / revenue * 100.0, 4)
+    if amt <= 0:
+        return None
+    # 仅拦截荒谬：单行 > 营收 25%（留足刚性工资空间；12% 硬压会扭曲结构）
+    if revenue > 0 and amt > revenue * 0.25:
+        ratio_pct = 15.0
+        amt = round(revenue * 0.15, 2)
+    try:
+        ref = float(it.get("reference_amount") or 0)
+    except (TypeError, ValueError):
+        ref = 0.0
+    if ref <= 0:
+        ref = amt
+    return {
+        "row": row,
+        "budget_amount": amt,
+        "budget_ratio_pct": round(ratio_pct, 4),
+        "reference_amount": round(ref, 2),
+        "reason": str(it.get("reason") or "").strip() or "DeepSeek 占比重算",
+        "selected": True,
+        "has_last_year": False,
+        "last_year_actual": 0.0,
+        "write_last_year": False,
+        "subject": str(it.get("subject") or ""),
+        "expense_name": str(it.get("expense_name") or ""),
+    }
+
+
+def _subject_sum_report(
+    cleaned: list[dict],
+    lines_meta: list[dict],
+    period_expenses: dict | None,
+    revenue: float,
+) -> dict:
+    """科目合计 vs 利润表期间费用，供第二轮对账。"""
+    row_subj = {}
+    for it in lines_meta:
+        try:
+            row_subj[int(it["row"])] = str(it.get("subject") or "")
+        except (TypeError, ValueError, KeyError):
+            continue
+    sums: dict[str, float] = {}
+    for x in cleaned:
+        subj = str(x.get("subject") or row_subj.get(x["row"]) or "其他")
+        sums[subj] = sums.get(subj, 0.0) + float(x["budget_amount"])
+    pe = period_expenses if isinstance(period_expenses, dict) else {}
+    anchors = {
+        "销售费用": float(pe.get("selling_latest") or pe.get("selling_expense") or 0),
+        "管理费用": float(pe.get("admin_latest") or pe.get("admin_expense") or 0)
+        + float(pe.get("rd_latest") or pe.get("rd_expense") or 0),
+        "财务费用": float(pe.get("finance_latest") or pe.get("finance_expense") or 0),
+    }
+    gaps = []
+    for subj, anchor in anchors.items():
+        got = sums.get(subj, 0.0)
+        if anchor <= 0:
+            continue
+        rel = abs(got - anchor) / anchor if anchor else 0
+        gaps.append(
+            {
+                "subject": subj,
+                "period_latest": round(anchor, 2),
+                "budget_sum": round(got, 2),
+                "gap": round(got - anchor, 2),
+                "rel_error": round(rel, 4),
+                "need_fix": rel > 0.25,
+            }
+        )
+    total = sum(float(x["budget_amount"]) for x in cleaned)
+    return {
+        "subject_sums": {k: round(v, 2) for k, v in sums.items()},
+        "anchors": {k: round(v, 2) for k, v in anchors.items()},
+        "gaps": gaps,
+        "total_budget": round(total, 2),
+        "fee_rate_pct": round(total / revenue * 100, 4) if revenue else 0,
+        "need_second_pass": any(g.get("need_fix") for g in gaps),
+    }
+
+
+def rebalance_expense_ratios(context: dict) -> tuple[list[dict], str, str]:
+    """DeepSeek 准确性优先：多轮占比重算 + 期间费用对账。
+
+    时间可放宽；本地只做恒等（G=C2×H%）与极端超上限缩放，不改结构权重。
+    输入：budget_revenue、expense_budget_cap、period_expenses、lines
+    输出：items[{row, budget_amount, budget_ratio_pct, reference_amount, reason}]
+    """
+    engine = _engine(timeout=float(context.get("timeout") or 300.0))
+    if engine is None:
+        return [], "", "大模型未配置，无法由 DeepSeek 重算占比"
+
+    revenue = float(context.get("budget_revenue") or 0)
+    cap = float(context.get("expense_budget_cap") or 0)
+    lines = context.get("lines") or []
+    period_expenses = context.get("period_expenses")
+    growth = float(context.get("revenue_growth_rate") or 0)
+    if revenue <= 0 or not lines:
+        return [], "", "缺少营收或费用行，无法重算占比"
+
+    wb = context.get("wb_model") if isinstance(context.get("wb_model"), dict) else {}
+    fee_band = (wb.get("period_expense_ratio_band") or {}) if wb else {}
+    fee_lo = float(fee_band.get("min") or 0.08) * 100
+    fee_hi = float(fee_band.get("max") or 0.18) * 100
+    from core import compliance_policy as compliance_mod
+
+    system = (
+        "你是中国企业费用预算 CFO。按 WB 行业基准 + 合规硬规则重算金额。"
+        + compliance_mod.hard_rules_prompt_suffix()
+        + "硬规则："
+        "1) budget_ratio_pct 为占预算营收百分点：50万/1亿→0.5；"
+        "2) budget_amount = round(budget_revenue * budget_ratio_pct / 100, 2)；"
+        "3) Σbudget ≤ expense_budget_cap 且 ≤ hard_cap（增速匹配+行业带）；"
+        f"总费用率 {fee_lo:.1f}%～{fee_hi:.1f}%；"
+        "4) 单行通常≤4%，刚性≤8～10%；禁止堆在1～2行；"
+        "5) 各大类对齐 period_expenses 与历史占比，偏差宜≤25%；"
+        "6) 有上年时费用增幅≤收入增速+3pp；reference≈上年×(1+g)；"
+        "7) 只返回 JSON："
+        '{"summary":"...","items":[{"row":14,"budget_amount":0,'
+        '"budget_ratio_pct":0.12,"reference_amount":0,"reason":"历史对标/增速/合规"}]}。'
+    )
+
+    slim: list[dict] = []
+    for it in lines:
+        if not isinstance(it, dict):
+            continue
+        try:
+            row = int(it.get("row"))
+        except (TypeError, ValueError):
+            continue
+        bud = float(it.get("budget_amount") or 0)
+        slim.append(
+            {
+                "row": row,
+                "subject": it.get("subject"),
+                "expense_name": it.get("expense_name"),
+                "invoice_name": it.get("invoice_name"),
+                "last_year_actual": float(it.get("last_year_actual") or 0),
+                "budget_amount_current": bud,
+                "current_ratio_pct": round(bud / revenue * 100, 4) if revenue else 0,
+            }
+        )
+    valid_rows = {x["row"] for x in slim}
+    by_subj: dict[str, list[dict]] = {}
+    for x in slim:
+        by_subj.setdefault(str(x.get("subject") or "其他"), []).append(x)
+
+    base_payload = {
+        "company_name": context.get("company_name"),
+        "industry": context.get("industry"),
+        "budget_revenue": revenue,
+        "expense_budget_cap": cap,
+        "revenue_growth_rate": growth,
+        "period_expenses": period_expenses,
+        "accuracy_first": True,
+        "hint": (
+            "准确性优先：金额与占比必须恒等；大类合计对齐 period_expenses；"
+            "不要为了凑数胡乱放大单行。"
+        ),
+    }
+
+    merged: dict[int, dict] = {}
+    summaries: list[str] = []
+    errors: list[str] = []
+
+    def _run_batch(batch_lines: list[dict], pass_label: str, extra: dict | None = None) -> None:
+        payload = {**base_payload, "pass": pass_label, "lines": batch_lines}
+        if extra:
+            payload.update(extra)
+        user = json.dumps(payload, ensure_ascii=False)
+        try:
+            content = engine.chat(user, system_prompt=system, max_tokens=8_000)
+            obj = _parse_budget_json(content)
+        except AIEngineError as e:
+            errors.append(f"{pass_label}:{e}")
+            return
+        except Exception as e:
+            errors.append(f"{pass_label}:{type(e).__name__}")
+            return
+        if not isinstance(obj, dict):
+            errors.append(f"{pass_label}:非对象")
+            return
+        s = str(obj.get("summary") or "").strip()
+        if s:
+            summaries.append(f"[{pass_label}] {s}")
+        for raw in obj.get("items") or []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                r0 = int(raw.get("row"))
+            except (TypeError, ValueError):
+                continue
+            meta = next((x for x in slim if x["row"] == r0), None)
+            if meta and not raw.get("subject"):
+                raw = {**raw, "subject": meta.get("subject"), "expense_name": meta.get("expense_name")}
+            norm = _normalize_ratio_amount_item(raw, revenue=revenue, valid_rows=valid_rows)
+            if norm:
+                merged[norm["row"]] = norm
+
+    for subj, rows in by_subj.items():
+        with_amt = [x for x in rows if x["budget_amount_current"] > 0]
+        zeros = [x for x in rows if x["budget_amount_current"] <= 0]
+        batch = (with_amt + zeros)[:36]
+        if not batch:
+            continue
+        _run_batch(batch, f"P1-{subj}")
+
+    if len(merged) < 3:
+        with_amt = [x for x in slim if x["budget_amount_current"] > 0]
+        zeros = [x for x in slim if x["budget_amount_current"] <= 0][:50]
+        _run_batch((with_amt + zeros)[:90], "P1-all")
+
+    cleaned = list(merged.values())
+    if not cleaned:
+        return [], "；".join(summaries), (
+            "；".join(errors) if errors else "DeepSeek 未返回有效占比行"
+        )
+
+    report = _subject_sum_report(cleaned, slim, period_expenses, revenue)
+    max_passes = int(context.get("max_passes") or 3)
+    if report.get("need_second_pass") and max_passes >= 2:
+        gap_lines = [
+            {
+                "row": x["row"],
+                "subject": x.get("subject"),
+                "expense_name": x.get("expense_name"),
+                "budget_amount_current": x["budget_amount"],
+                "current_ratio_pct": x["budget_ratio_pct"],
+            }
+            for x in cleaned
+        ]
+        _run_batch(
+            gap_lines,
+            "P2-reconcile",
+            extra={
+                "qa_report": report,
+                "instruction": (
+                    "上轮科目合计与利润表期间费用偏差过大。"
+                    "请校正 items，使各大类 budget 合计贴近 anchors"
+                    "（可按收入增长率微调），并保持行内金额=占比恒等。"
+                    "只返回需调整的行 + 关键行，或返回全量更准确的结果。"
+                ),
+            },
+        )
+        cleaned = list(merged.values())
+        report = _subject_sum_report(cleaned, slim, period_expenses, revenue)
+
+    if max_passes >= 3 and (
+        (cap > 0 and report["total_budget"] > cap * 1.05)
+        or report["fee_rate_pct"] > 20
+        or report.get("need_second_pass")
+    ):
+        _run_batch(
+            [
+                {
+                    "row": x["row"],
+                    "subject": x.get("subject"),
+                    "expense_name": x.get("expense_name"),
+                    "budget_amount_current": x["budget_amount"],
+                    "current_ratio_pct": x["budget_ratio_pct"],
+                }
+                for x in cleaned
+            ],
+            "P3-final",
+            extra={
+                "qa_report": report,
+                "instruction": (
+                    "终检：1) 每行 budget_amount 与 budget_ratio_pct 严格恒等；"
+                    "2) Σ ≤ expense_budget_cap；3) 总费用率合理；"
+                    "4) 科目合计对齐 period_expenses。返回全量最终 items。"
+                ),
+            },
+        )
+        cleaned = list(merged.values())
+
+    final: list[dict] = []
+    for x in cleaned:
+        norm = _normalize_ratio_amount_item(x, revenue=revenue, valid_rows=valid_rows)
+        if norm:
+            final.append(norm)
+    if not final:
+        return [], "；".join(summaries), "规范化后无有效行"
+
+    total = sum(x["budget_amount"] for x in final)
+    summary = " | ".join(summaries)[:900] if summaries else "DeepSeek 多轮占比重算"
+    if cap > 0 and total > cap * 1.02:
+        scale = cap / total
+        for x in final:
+            x["budget_amount"] = round(x["budget_amount"] * scale, 2)
+            x["reference_amount"] = round(float(x.get("reference_amount") or 0) * scale, 2)
+            x["budget_ratio_pct"] = (
+                round(x["budget_amount"] / revenue * 100, 4) if revenue else 0
+            )
+        summary = (summary + f" （合计按费用上限等比缩至 {cap:,.0f} 元，结构不变）").strip()
+        total = sum(x["budget_amount"] for x in final)
+
+    report_f = _subject_sum_report(final, slim, period_expenses, revenue)
+    fee = report_f["fee_rate_pct"]
+    summary = (
+        f"{summary} | 终检：ΣG={total:,.0f} 总费用率={fee:.2f}% "
+        f"科目={report_f['subject_sums']}"
+    ).strip()
+    if errors and not final:
+        return [], summary, "；".join(errors)
+    return final, summary, ("" if final else "；".join(errors))
+
+
+
+def advise_budget_expenses(context: dict) -> tuple[list[dict], str, str]:
+    """DeepSeek 全量编制费用建议（主路径，非规则微调）。
+
+    按四大科目分批调用，覆盖空白行，给出老板「该花什么钱」的完整建议。
+    返回 (items, summary, error)。
+    """
+    engine = _engine(timeout=150.0)
+    if engine is None:
+        return [], "", "大模型未配置。费用编制建议需 DeepSeek 全量介入，请先在设置中配置 API Key。"
+
+    catalog = context.get("catalog") or context.get("empty_or_zero_budget_lines") or []
+    if not catalog:
+        return [], "", "模板费用目录为空"
+
+    by_subject: dict[str, list[dict]] = {}
+    for row in catalog:
+        if not isinstance(row, dict):
+            continue
+        # 主路径：预算已为 0 的行优先；也允许 AI 对已有行提出调增
+        subj = str(row.get("subject") or "其他")
+        by_subject.setdefault(subj, []).append(row)
+
+    rev = float(context.get("budget_revenue") or 0)
+    cap = float(context.get("expense_budget_cap") or 0)
+    wb = context.get("wb_model") if isinstance(context.get("wb_model"), dict) else {}
+    fee_band = (wb.get("period_expense_ratio_band") or {}) if wb else {}
+    fee_lo = float(fee_band.get("min") or 0.08) * 100
+    fee_hi = float(fee_band.get("max") or 0.18) * 100
+    fee_md = float(fee_band.get("median") or 0.12) * 100
+    target_tot = float(wb.get("target_fee_total") or 0) if wb else 0
+    growth = float(context.get("revenue_growth_rate") or 0)
+    from core import compliance_policy as compliance_mod
+
+    system = (
+        "你是中国中小企业 CFO。按 WB 行业基准 + 合规三条硬规则做费用编制建议。"
+        + compliance_mod.hard_rules_prompt_suffix()
+        + "导出表：E=D/上年营收、H=G/预算营收 由建模计算；你只给准金额。"
+        "硬性规则："
+        "1) 无上年：禁止虚构 last_year_actual；必给 reference_amount 与 budget_amount；"
+        "2) 有上年：reference≈D×(1+g)；budget 增幅≤收入增速+3个百分点；"
+        "3) budget_amount = round(budget_revenue * budget_ratio_pct/100, 2)；"
+        f"4) budget_revenue={rev}，cap={cap}，g={growth:.4f}；"
+        f"   费用率 {fee_lo:.1f}%～{fee_hi:.1f}%（中枢{fee_md:.1f}%）；"
+        f"   Σbudget 目标≈{target_tot:,.0f} 且 ≤ hard_cap（见 compliance_limits）；"
+        "5) 必须对标 historical 费用率；大类对齐 period_expenses；"
+        "6) 单行通常≤4%，刚性≤8%；禁止虚增成本；"
+        "7) reason 须写：历史占比 / 增速匹配 / 金税合规；"
+        "8) 只返回 JSON："
+        '{"summary":"...","items":[{"row":14,"reference_amount":0,"budget_amount":0,'
+        '"budget_ratio_pct":0.15,"reason":"...","priority":"high","selected":true}]}。'
+    )
+
+    meta = {
+        k: context.get(k)
+        for k in (
+            "company_name", "industry", "year", "budget_revenue", "budget_cost",
+            "last_year_revenue", "expense_budget_cap", "allocated_before", "residual",
+            "revenue_growth_rate", "period_expenses", "subject_mix_hint", "hard_rules",
+            "ocr_excerpt", "wb_model", "compliance_limits", "compliance_rules",
+        )
+        if context.get(k) is not None
+    }
+    meta_json = json.dumps(meta, ensure_ascii=False)
+
+    all_items: list[dict] = []
+    summaries: list[str] = []
+    errors: list[str] = []
+
+    for subject, rows in by_subject.items():
+        # 优先传预算为 0 的行；若过少则带全科目
+        zeros = [r for r in rows if float(r.get("budget_amount") or 0) <= 0]
+        batch = zeros if len(zeros) >= 3 else rows
+        # 控制长度：每科目最多 24 行目录
+        batch = batch[:24]
+        cat_json = json.dumps(batch, ensure_ascii=False)
+        residual = float(context.get("residual") or 0)
+        cap = float(context.get("expense_budget_cap") or 0)
+        share_hint = (context.get("subject_mix_hint") or {}).get(subject)
+        user = (
+            f"【全量编制·科目】{subject}\n"
+            f"【企业与上限】{meta_json}\n"
+            f"【本科目建议占用 residual 的参考占比】{share_hint if share_hint is not None else '按行业常识'}\n"
+            f"【费用预算上限】{cap} 元 · residual≈{residual} 元\n"
+            f"【模板行目录（请从中选行并给出金额）】{cat_json}\n"
+            "请输出本科目完整编制建议 JSON（不要空 items）。"
+        )
+        try:
+            content = engine.chat(user, system_prompt=system, max_tokens=4_096)
+            obj = _parse_budget_json(content)
+        except AIEngineError as e:
+            errors.append(f"{subject}:{e}")
+            continue
+        except Exception as e:
+            errors.append(f"{subject}:{type(e).__name__}")
+            continue
+        if not isinstance(obj, dict):
+            errors.append(f"{subject}:非对象")
+            continue
+        sum_s = str(obj.get("summary") or "").strip()
+        if sum_s:
+            summaries.append(f"{subject}：{sum_s}")
+        items = obj.get("items") if isinstance(obj.get("items"), list) else []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            try:
+                row = int(it.get("row"))
+            except (TypeError, ValueError):
+                continue
+
+            def _f(key: str, src: dict = it) -> float:
+                try:
+                    return round(float(src.get(key) or 0), 2)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            # 目录内校验 has_last_year
+            cat_row = next((r for r in rows if int(r.get("row") or -1) == row), None)
+            has_ly = bool(cat_row and float(cat_row.get("last_year_actual") or 0) > 0)
+            try:
+                ratio_pct = float(it.get("budget_ratio_pct") or 0)
+            except (TypeError, ValueError):
+                ratio_pct = 0.0
+            amt = _f("budget_amount")
+            # DeepSeek 占比优先：金额由 营收×占比 回算，避免占比与金额不一致
+            if ratio_pct > 0 and rev > 0:
+                amt = round(rev * ratio_pct / 100.0, 2)
+            elif amt > 0 and rev > 0:
+                ratio_pct = round(amt / rev * 100.0, 4)
+            ref = _f("reference_amount")
+            if ref <= 0:
+                ref = amt
+            all_items.append(
+                {
+                    "row": row,
+                    "reference_amount": ref,
+                    "budget_amount": amt,
+                    "budget_ratio_pct": round(ratio_pct, 4),
+                    "last_year_actual": 0.0 if not has_ly else float(cat_row.get("last_year_actual") or 0),
+                    "has_last_year": has_ly,
+                    "reason": str(it.get("reason") or "").strip(),
+                    "priority": str(it.get("priority") or "mid"),
+                    "selected": bool(it.get("selected", True)),
+                    "drop": bool(it.get("drop", False)),
+                    "subject": subject,
+                    "expense_name": str((cat_row or {}).get("expense_name") or it.get("expense_name") or ""),
+                    "invoice_name": str((cat_row or {}).get("invoice_name") or it.get("invoice_name") or ""),
+                }
+            )
+
+    # 第二轮：总述 + 查漏补缺（金额仍过少时）
+    if all_items:
+        try:
+            brief = json.dumps(
+                {
+                    "meta": meta,
+                    "items_preview": [
+                        {"row": x["row"], "subject": x["subject"], "budget_amount": x["budget_amount"]}
+                        for x in all_items[:50]
+                    ],
+                    "count": len(all_items),
+                    "sum_budget": round(sum(float(x.get("budget_amount") or 0) for x in all_items), 2),
+                },
+                ensure_ascii=False,
+            )
+            content2 = engine.chat(
+                "根据已生成的分科目建议，写一段给老板的总述 summary，并补漏 0～8 条仍缺失的关键费用行。"
+                "只返回 JSON：{\"summary\":\"...\",\"items\":[...]}。\n" + brief[:12_000],
+                system_prompt=system,
+                max_tokens=2_048,
+            )
+            obj2 = _parse_budget_json(content2)
+            if isinstance(obj2, dict):
+                s2 = str(obj2.get("summary") or "").strip()
+                if s2:
+                    summaries.insert(0, s2)
+                for it in obj2.get("items") or []:
+                    if isinstance(it, dict) and it.get("row") is not None:
+                        try:
+                            row = int(it["row"])
+                        except (TypeError, ValueError):
+                            continue
+                        all_items.append(
+                            {
+                                "row": row,
+                                "reference_amount": float(it.get("reference_amount") or 0),
+                                "budget_amount": float(it.get("budget_amount") or 0),
+                                "last_year_actual": 0.0,
+                                "has_last_year": False,
+                                "reason": str(it.get("reason") or "").strip(),
+                                "priority": str(it.get("priority") or "mid"),
+                                "selected": bool(it.get("selected", True)),
+                                "drop": bool(it.get("drop", False)),
+                                "subject": str(it.get("subject") or ""),
+                                "expense_name": str(it.get("expense_name") or ""),
+                                "invoice_name": str(it.get("invoice_name") or ""),
+                            }
+                        )
+        except Exception:
+            pass
+
+    if not all_items:
+        return [], "", ("；".join(errors) if errors else "DeepSeek 未给出可用费用编制项")
+
+    # 同行合并：取较大预算
+    merged: dict[int, dict] = {}
+    for it in all_items:
+        if it.get("drop"):
+            continue
+        row = int(it["row"])
+        cur = merged.get(row)
+        if cur is None or float(it.get("budget_amount") or 0) > float(cur.get("budget_amount") or 0):
+            merged[row] = it
+
+    summary = " ".join(summaries)[:800]
+    if errors:
+        summary = (summary + f" （部分科目重试提示：{';'.join(errors[:3])}）").strip()
+    return list(merged.values()), summary, ""

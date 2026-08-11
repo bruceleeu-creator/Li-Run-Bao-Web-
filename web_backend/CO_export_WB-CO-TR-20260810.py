@@ -28,6 +28,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from core import diagnostic as diag_mod
 from core import interactive as iv_mod
@@ -188,6 +189,9 @@ def export_status() -> dict:
             "decisions": 0,
         }
     unlocked = sess.is_export_unlocked
+    dq = session.get_data_quality() if hasattr(session, "get_data_quality") else {}
+    policy = session.get_policy() if hasattr(session, "get_policy") else {}
+    require_confirm = bool((dq or {}).get("require_confirm") or (dq or {}).get("confidence") == "low")
     return {
         "ready": True,
         "unlocked": unlocked,
@@ -199,6 +203,9 @@ def export_status() -> dict:
         "feasibility_score": sess.feasibility_score,
         "state": sess.state,
         "total_est_saving": sess.total_est_saving,
+        "data_quality": dq or {},
+        "policy": policy or {},
+        "require_confirm": require_confirm,
     }
 
 
@@ -264,11 +271,16 @@ def export_excel() -> FileResponse:
 budget_job_mod = importlib.import_module("web_backend.CO_budget_export_job_WB-CO-TR-20260810")
 
 
+class BudgetExportJobIn(BaseModel):
+    """启动预算三表任务。建议先走费用编制建议，再把勾选项传入自动填表。"""
+    advice_items: list[dict] = Field(default_factory=list)
+
+
 @router.post("/budget/jobs")
-def start_budget_export_job() -> dict:
-    """异步启动费用预算三表生成（DeepSeek 多片段提取 + 规则补齐）。"""
+def start_budget_export_job(body: BudgetExportJobIn = BudgetExportJobIn()) -> dict:
+    """异步启动费用预算三表：DeepSeek 提取 + 可选编制建议自动填入。"""
     try:
-        return budget_job_mod.start_budget_export_job()
+        return budget_job_mod.start_budget_export_job(advice_items=body.advice_items or None)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:

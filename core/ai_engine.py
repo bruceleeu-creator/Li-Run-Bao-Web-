@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
+from . import compliance_policy as compliance_mod
 from . import finance as fin
 from .diagnostic import (
     CATEGORY_REALITY,
@@ -40,6 +41,7 @@ _COMPLIANCE_SYSTEM = (
     "严禁任何虚开发票、隐匿收入、虚构成本或教唆违法表述。"
     "金额单位统一为元；比例用百分比数值（如 12.5 表示 12.5%）。"
     "只输出 JSON，不要 markdown 代码围栏，不要额外解释。"
+    + compliance_mod.hard_rules_prompt_suffix()
 )
 
 
@@ -376,7 +378,10 @@ class AIEngine:
         user_prompt = (
             "以下是企业财务数据与规则引擎已发现的问题。请补充更多诊断发现。\n\n"
             f"{self.compact_financial_context(data, ocr_texts=ocr_texts)}\n\n"
+            f"{compliance_mod.prompt_context_block(data)}\n\n"
             f"【规则引擎已有发现】\n{existing_brief}\n\n"
+            "请重点评估：历史费用率对标、收入上涨后合规筹划空间、费用增速是否匹配营收增速。"
+            "severity：低=绿色关注、中=橙色预警、高=红色重大风险。"
             "请输出 JSON：{\"findings\":[...]}。"
         )
         content = self._chat(
@@ -444,6 +449,7 @@ class AIEngine:
             + "任务：为一条诊断发现生成互动出题用的 A/B/C 三个可量化选项。"
             "A=积极落地（目标更进取，动作具体），B=分阶段平衡，C=暂维持/仅备查（须提示风险）。"
             "每个选项必须能让非财务老板看懂「选了以后发生什么」。"
+            "选项中的费用/成本目标必须遵守：历史费用率对标、金税四期合规、费用增幅匹配营收增速、行业区间。"
             "返回 JSON 数组，每项字段："
             "label,name,description,target_value,est_saving,cost_saving,tax_saving,"
             "tax_impact,feasibility,risk_level,action_note。"
@@ -658,7 +664,7 @@ class AIEngine:
                 name=str(o.get("name", "")).strip() or f"方案{label}",
                 description=str(o.get("description", "")).strip(),
                 target_value=cls._safe_float(o.get("target_value"), 0.0),
-                tax_rate=cls._safe_float(o.get("tax_rate"), 0.25),
+                tax_rate=cls._safe_float(o.get("tax_rate"), 0.15),
                 est_saving=est,
                 cost_saving=cost_s,
                 tax_saving=tax_s,
@@ -717,7 +723,7 @@ class AIEngine:
                 name=str(item.get("name", "")).strip() or f"方案{label}",
                 description=str(item.get("description", "")).strip(),
                 target_value=AIEngine._safe_float(item.get("target_value"), finding.target_value),
-                tax_rate=AIEngine._safe_float(item.get("tax_rate"), 0.25),
+                tax_rate=AIEngine._safe_float(item.get("tax_rate"), 0.15),
                 est_saving=est,
                 cost_saving=cost_s,
                 tax_saving=tax_s,

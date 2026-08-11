@@ -9,9 +9,10 @@
   --line: rgba(255, 255, 255, 0.09);
   --ink: #eef2e9;
   --ink-dim: #9aa393;
-  --accent: #d7ff3e; /* 荧光黄绿 */
-  --accent-orange: #ff7a3d;
-  --accent-risk: #ff5d5d;
+  --accent: #d7ff3e; /* 荧光黄绿（品牌强调） */
+  --accent-green: #3ecf8e; /* 低风险：清晰绿色 */
+  --accent-orange: #ff7a3d; /* 中风险 */
+  --accent-risk: #ff5d5d; /* 高风险 */
   --radius: 10px;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -551,6 +552,117 @@ button {
 .export-card span {
   font-size: 12px;
   color: var(--ink-dim);
+}
+
+/* ── 费用编制建议（预算三表导出后） ── */
+
+.advice-panel {
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid rgba(215, 255, 62, 0.22);
+  border-radius: var(--radius);
+  background: rgba(215, 255, 62, 0.03);
+}
+
+.advice-panel__title {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.advice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 480px;
+  overflow: auto;
+  margin-top: 12px;
+  padding-right: 4px;
+}
+
+.advice-item {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  cursor: pointer;
+}
+
+.advice-item:hover {
+  border-color: rgba(215, 255, 62, 0.35);
+}
+
+.advice-item--high {
+  border-left: 3px solid var(--accent);
+}
+
+.advice-item--mid {
+  border-left: 3px solid var(--accent-orange);
+}
+
+.advice-item--low {
+  border-left: 3px solid var(--ink-dim);
+}
+
+.advice-item__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.advice-item__tag {
+  font-size: 11px;
+  color: var(--ink-dim);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.advice-item__tag--warn {
+  color: var(--accent-orange);
+  border-color: rgba(255, 122, 61, 0.4);
+}
+
+.advice-item__prio {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.advice-item__nums {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.advice-item__reason {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.advice-notes {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.advice-notes ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
 }
 
 /* ── 导入表单 ── */
@@ -1923,9 +2035,91 @@ button {
   background: linear-gradient(180deg, rgba(255, 93, 93, 0.07), rgba(255, 93, 93, 0.02) 60%);
 }
 
+/* 风险等级色：低=绿（上）/ 中=橙（中）/ 高=红（下） */
+.finding--sev-low::before {
+  background: var(--accent-green);
+  opacity: 1;
+}
+
+.finding--sev-low {
+  border-color: rgba(62, 207, 142, 0.45);
+  background: linear-gradient(180deg, rgba(62, 207, 142, 0.12), rgba(62, 207, 142, 0.03) 60%);
+}
+
+.finding--sev-low .finding__tag {
+  background: rgba(62, 207, 142, 0.2);
+  color: var(--accent-green);
+}
+
+.finding--sev-med::before {
+  background: var(--accent-orange);
+  opacity: 1;
+}
+
+.finding--sev-med {
+  border-color: rgba(255, 122, 61, 0.4);
+  background: linear-gradient(180deg, rgba(255, 122, 61, 0.07), rgba(255, 122, 61, 0.02) 60%);
+}
+
+.finding--sev-med .finding__tag {
+  background: rgba(255, 122, 61, 0.16);
+  color: var(--accent-orange);
+}
+
+.finding--sev-high::before {
+  background: var(--accent-risk);
+  opacity: 1;
+}
+
+.finding--sev-high {
+  border-color: rgba(255, 93, 93, 0.4);
+  background: linear-gradient(180deg, rgba(255, 93, 93, 0.07), rgba(255, 93, 93, 0.02) 60%);
+}
+
+.finding--sev-high .finding__tag {
+  background: rgba(255, 93, 93, 0.16);
+  color: var(--accent-risk);
+}
+
 .finding__tag {
   border-radius: 999px;
   letter-spacing: 0.05em;
+}
+
+.diag-risk-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.diag-risk-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+}
+
+.diag-risk-legend__item--low {
+  border-color: rgba(62, 207, 142, 0.45);
+  color: var(--accent-green);
+  background: rgba(62, 207, 142, 0.08);
+}
+
+.diag-risk-legend__item--med {
+  border-color: rgba(255, 122, 61, 0.45);
+  color: var(--accent-orange);
+  background: rgba(255, 122, 61, 0.08);
+}
+
+.diag-risk-legend__item--high {
+  border-color: rgba(255, 93, 93, 0.45);
+  color: var(--accent-risk);
+  background: rgba(255, 93, 93, 0.08);
 }
 
 .finding h3 {

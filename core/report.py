@@ -783,7 +783,7 @@ def _budget_indicator_rows(plan) -> List[List[str]]:
         ["上年度毛利率（C9=(C6-C8)/C6）", f"{tc.last_year_gross_margin*100:.2f}%", "公式计算"],
         ["行业所得税贡献率（E2）", f"{ti.industry_contribution_rate*100:.4f}%", "模板默认（待核验）"],
         ["企业预算所得税贡献率（E3）", f"{ti.company_contribution_rate*100:.4f}%", "顶部输入"],
-        ["所得税税率（E4）", f"{ti.income_tax_rate*100:.2f}%", "模板默认（待核验）"],
+        ["所得税税率（E4）", f"{ti.income_tax_rate*100:.2f}%", "默认高新 15%（可改选 5%/25%）"],
         ["应交所得税预算（E5=E3×C2）", f"{tc.income_tax_budget:,.2f} 元", "公式计算"],
         ["利润总额预算（E6=E5/E4）", f"{tc.profit_total_budget:,.2f} 元", "公式计算"],
         ["费用预算上限（E7=C4-E6）", f"{tc.expense_budget_cap:,.2f} 元", "公式计算"],

@@ -57,6 +57,10 @@ demo_output/*
 !demo_output/budget_3sheet_WB-CO-TR-20260726.xlsx
 !demo_output/budget_report_WB-CO-TR-20260726.docx
 !demo_output/budget_report_WB-CO-TR-20260726.pdf
+# Phase B 案例清单与对标金标（可提交）
+!demo_output/cases/
+!demo_output/cases/**
+
 
 # Config
 *.env

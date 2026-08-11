@@ -83,8 +83,9 @@ def test_p0_2_excel_three_sheets_in_one_workbook(sample_plan, tmp_path):
     bt.write_template(sample_plan, path)
     import openpyxl
     wb = openpyxl.load_workbook(path)
-    assert wb.sheetnames == ["费用预算表", "行业企业所得税贡献率参考", "诊断与行动清单"], \
-        f"三 Sheet 顺序与名称不匹配：{wb.sheetnames}"
+    assert wb.sheetnames[:3] == ["费用预算表", "行业企业所得税贡献率参考", "诊断与行动清单"], \
+        f"前三 Sheet 顺序与名称不匹配：{wb.sheetnames}"
+    assert "费用合规筹划约束" in wb.sheetnames, f"须含合规约束 Sheet：{wb.sheetnames}"
     wb.close()
 
 

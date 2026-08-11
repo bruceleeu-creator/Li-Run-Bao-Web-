@@ -1025,12 +1025,39 @@ def merge_years(*datas: FinancialData) -> FinancialData:
         warnings.extend(meta.get("warnings", []))
 
     merged.years = sorted(years_all)
+    # 命中科目：有任意年份金额的利润表+资产负债表科目数
+    matched_accounts = 0
+    for table in (merged.income_statement, merged.balance_sheet):
+        for _acc, yv in (table or {}).items():
+            if any(v is not None and v != 0 for v in (yv or {}).values()):
+                matched_accounts += 1
+            elif yv:
+                matched_accounts += 1
+    matched_cells = 0
+    for table in (merged.income_statement, merged.balance_sheet, merged.account_balances):
+        for _acc, yv in (table or {}).items():
+            for _yr, val in (yv or {}).items():
+                if val is not None:
+                    matched_cells += 1
     merged.parsed_meta = {
-        "matched": sum(len(d.income_statement) for d in datas),
+        "matched": matched_accounts or matched_cells,
+        "matched_cells": matched_cells,
         "unmatched": [],
         "warnings": warnings,
         "merged_files": len(datas),
+        "source": "merged_audit_reports",
+        "text_layer": any(bool((d.parsed_meta or {}).get("text_layer")) for d in datas),
+        "ocr_used": any(bool((d.parsed_meta or {}).get("ocr_used")) for d in datas),
     }
+    # 归一 + 勾稽 + 税负/费用异常（通用多年导入）
+    try:
+        from . import reconciliation as recon_mod
+
+        recon_mod.enrich_financial_data(merged, industry=merged.industry or "")
+    except Exception as exc:  # 不阻断导入
+        merged.parsed_meta.setdefault("warnings", []).append(
+            f"勾稽 enrich 跳过：{type(exc).__name__}: {exc}"
+        )
     return merged
 
 

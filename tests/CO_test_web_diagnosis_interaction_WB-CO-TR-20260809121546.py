@@ -260,3 +260,16 @@ def test_identify_company_year_only_fallback():
     body = r.json()
     assert body["company_name"] == ""
     assert body["industry"] == "制造业"  # 行业回退默认
+
+
+def test_diagnosis_findings_sorted_low_medium_high():
+    """发现按风险等级排序：低（上）→ 中 → 高（下），便于前端绿色/橙色/红色分区渲染。"""
+    _load_sample()
+    r = CLIENT.post("/api/diagnosis/run")
+    assert r.status_code == 200, r.text
+    findings = r.json()["findings"]
+    assert len(findings) >= 4
+    rank = {"低": 0, "中": 1, "高": 2}
+    levels = [rank.get(f["severity"], 9) for f in findings]
+    assert levels == sorted(levels), f"严重度应按 低→中→高 排序，实际: {[f['severity'] for f in findings]}"
+

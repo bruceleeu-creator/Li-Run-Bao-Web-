@@ -70,11 +70,54 @@ export interface FilePreview {
   notes: string[];
 }
 
+/** 导入管线 data_quality（与后端 pipeline 契约一致） */
+export interface DataQuality {
+  confidence?: "high" | "medium" | "low" | string;
+  text_layer?: boolean;
+  ocr_used?: boolean;
+  matched_cells?: number;
+  require_confirm?: boolean;
+  export_blocked?: boolean;
+  reconciliation?: {
+    ok?: boolean;
+    hard_fail?: boolean;
+    error_count?: number;
+    warning_count?: number;
+    errors?: string[];
+    warnings?: string[];
+  };
+  expense_anomalies?: Array<{ type?: string; message?: string; severity?: string }>;
+  parse_notes?: string[];
+}
+
+/** PolicySnapshot 简版（导入/会话共用） */
+export interface PolicySnapshot {
+  industry_key?: string;
+  e2?: number;
+  e3?: number;
+  e4?: number;
+  e2_industry_contribution?: number;
+  e3_company_contribution?: number;
+  e4_income_tax_rate?: number;
+  e3_basis?: string;
+  e4_source?: string;
+  near_zero_selling?: boolean;
+  fee_growth_mode?: string;
+  revenue_volatile?: boolean;
+}
+
 export interface ImportResponse {
   summary: SessionSummary;
   indicators: IndicatorMap[];
   years: number[];
   previews: FilePreview[];
+  data_quality?: DataQuality;
+  policy?: PolicySnapshot;
+  reconciliation?: DataQuality["reconciliation"];
+  cit_synthesis?: Record<string, unknown>;
+  expense_anomalies?: DataQuality["expense_anomalies"];
+  case_id?: string | null;
+  message?: string;
 }
 
 export interface PreviewResponse {
@@ -85,6 +128,8 @@ export interface SessionResponse {
   session: SessionSummary | null;
   indicators: IndicatorMap[];
   years: number[];
+  data_quality?: DataQuality;
+  policy?: PolicySnapshot;
 }
 
 export interface IndustriesResponse {

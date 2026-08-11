@@ -37,12 +37,13 @@ from .budget_categories import (
 UNIT_YUAN = "元"
 UNIT_PERCENT = "百分比"  # 内部用小数存储（0.05 = 5%），UI 显示时乘 100
 PRECISION_YUAN = 2       # 金额精度：2 位
-PRECISION_RATIO = 6      # 比例精度：6 位（避免 0.003 被截为 0.0）
+# 比例精度：8 位小数（千元级费用 / 数亿营收 ≈ 1e-6～1e-5，6 位会抹成 0）
+PRECISION_RATIO = 8
 
-# 默认值（与原模板一致；模板默认 0.30% 与 5% 仅作示例，须标注"待核验"）
+# 默认值（E2/E3 模板 0.30% 仅作占位；E4 默认高新 15%，可改选 5%/25%）
 DEFAULT_INDUSTRY_CONTRIBUTION_RATE = 0.003  # 0.30%
 DEFAULT_COMPANY_CONTRIBUTION_RATE = 0.003
-DEFAULT_INCOME_TAX_RATE = 0.05  # 5%（小型微利企业优惠税率，须核验适用条件）
+DEFAULT_INCOME_TAX_RATE = 0.15  # 15%（高新技术企业优惠税率；小微 5% / 法定 25% 可下拉切换）
 INCOME_TAX_RATE_CHOICES = (0.05, 0.15, 0.25)  # 5% / 15% / 25%
 
 # 执行监控阈值（执行率 = 实际 / 预算）
@@ -67,8 +68,32 @@ def _round_yuan(v: float) -> float:
 
 
 def _round_ratio(v: float) -> float:
-    """比例四舍五入到 6 位（保留 0.003 等小比例的有效数字）。"""
+    """比例四舍五入（保留小额费用率，如 3049/3.98亿 ≈ 0.00000767）。"""
     return round(v, PRECISION_RATIO)
+
+
+def format_ratio_pct(ratio: float, *, as_points: bool = False) -> str:
+    """占比展示：小比例自动加长小数，避免「有金额却显示 0.00%」。
+
+    ratio: 默认小数（0.05=5%）；as_points=True 时输入已是百分点（5 表示 5%）。
+    """
+    try:
+        r = float(ratio or 0)
+    except (TypeError, ValueError):
+        return "0%"
+    pct = r if as_points else r * 100.0
+    if pct == 0:
+        return "0%"
+    ap = abs(pct)
+    if ap < 0.001:
+        return f"{pct:.4f}%"
+    if ap < 0.01:
+        return f"{pct:.4f}%"
+    if ap < 0.1:
+        return f"{pct:.3f}%"
+    if ap < 1:
+        return f"{pct:.2f}%"
+    return f"{pct:.2f}%"
 
 
 # 向后兼容别名（旧测试可能引用）
@@ -263,7 +288,12 @@ def compute_line(line: ExpenseLine, ti: TopInputs) -> None:
     i = float(line.actual_amount or 0.0)
 
     line.last_year_expense_ratio = _round_ratio(_safe_div(d, c6))
-    line.reference_amount = _round_yuan(d * (1 + c7))
+    # F 列：有上年实际时按模板 F=D*(1+增长率)；无上年时保留已写入的参考金额
+    # （编制建议：D=0 时只给老板「参考费用金额 / 预算 / 占比」，不虚构上年）
+    if d > 0:
+        line.reference_amount = _round_yuan(d * (1 + c7))
+    else:
+        line.reference_amount = _round_yuan(float(line.reference_amount or 0.0))
     line.budget_expense_ratio = _round_ratio(_safe_div(g, c2))
     line.diff = _round_yuan(g - i)
     line.exec_rate = _round_ratio(_safe_div(i, g))

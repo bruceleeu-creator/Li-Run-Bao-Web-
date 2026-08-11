@@ -22,9 +22,11 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from core import case_manifest as case_mod
 from core import finance as fin_mod
 from core import industry as ind_mod
 from core import parser as parser_mod
+from core import pipeline as pipeline_mod
 
 # 会话模块文件名含智能体标识连字符，须用 importlib 加载
 session = importlib.import_module("web_backend.CO_session_WB-CO-TR-20260805160732")
@@ -439,8 +441,62 @@ def _handle_parse_error(e: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
+def _year_from_filename(path: str) -> int | None:
+    m = re.search(r"(20\d{2})", os.path.basename(path) or "")
+    return int(m.group(1)) if m else None
+
+
+def _align_year_to_filename(data, path: str):
+    """多份年报导入时：文件名年份优先，修正模型误判的唯一年份。
+
+    通用规则，适用于任意企业「2022年审计报告.pdf」命名；
+    不依赖艺康或其它特定客户。
+    """
+    y_from_name = _year_from_filename(path)
+    if not y_from_name or not data:
+        return data
+    years = list(data.years or [])
+    if years == [y_from_name]:
+        return data
+    if len(years) == 1 and years[0] != y_from_name:
+        old_y = years[0]
+        for table_name in ("income_statement", "balance_sheet", "account_balances"):
+            table = getattr(data, table_name) or {}
+            new_table: dict = {}
+            for acc, yv in table.items():
+                if not yv:
+                    continue
+                new_table[acc] = {
+                    (y_from_name if int(yr) == old_y else int(yr)): val
+                    for yr, val in yv.items()
+                }
+            setattr(data, table_name, new_table)
+        data.years = [y_from_name]
+        meta = dict(data.parsed_meta or {})
+        meta["year_aligned_from_filename"] = y_from_name
+        data.parsed_meta = meta
+    elif not years:
+        # 无年份：把现有金额归到文件名年
+        for table_name in ("income_statement", "balance_sheet", "account_balances"):
+            table = getattr(data, table_name) or {}
+            new_table: dict = {}
+            for acc, yv in table.items():
+                if not yv:
+                    continue
+                pick = None
+                for v in reversed(list(yv.values())):
+                    if v is not None:
+                        pick = v
+                        break
+                if pick is not None:
+                    new_table[acc] = {y_from_name: pick}
+            setattr(data, table_name, new_table)
+        data.years = [y_from_name]
+    return data
+
+
 def _parse_one(path: str, company_name: str, industry: str):
-    """解析单个文件。
+    """解析单个文件（供 pipeline.parse_one 回调；含 DeepSeek PDF 路径）。
 
     PDF（含扫描件）：优先走 DeepSeek 全权解析。已配置 AI 时 DeepSeek 必须
     成功，失败则抛明确错误，绝不静默回退到乱码的 pdfplumber 表格提取；
@@ -453,7 +509,7 @@ def _parse_one(path: str, company_name: str, industry: str):
         if cred.get("api_key"):
             ds = importlib.import_module("core.CO_deepseek_parse_WB-CO-TR-20260806140818")
             try:
-                return ds.parse_pdf_with_deepseek(
+                data = ds.parse_pdf_with_deepseek(
                     path,
                     api_key=cred["api_key"],
                     base_url=cred["base_url"],
@@ -461,6 +517,7 @@ def _parse_one(path: str, company_name: str, industry: str):
                     company_name=company_name,
                     industry=industry or "制造业",
                 )
+                return _align_year_to_filename(data, path)
             except parser_mod.ParserError:
                 raise
             except Exception as e:
@@ -469,11 +526,47 @@ def _parse_one(path: str, company_name: str, industry: str):
                     f"扫描件 PDF 解析失败（DeepSeek）：{type(e).__name__}: {e}"
                 ) from e
         # 未配置 AI：回退本地解析。带表格的普通 PDF 可解析，扫描件会抛 ParserError
-        return parser_mod.parse_smart(
+        data = parser_mod.parse_smart(
             path, company_name=company_name, industry=industry or "制造业",
         )
+        return _align_year_to_filename(data, path)
     return parser_mod.parse_smart(
         path, company_name=company_name, industry=industry or "制造业",
+    )
+
+
+def _collect_ocr_texts(previews: list) -> list[str]:
+    ocr_texts: list[str] = []
+    for pv in previews:
+        fname = pv.get("name", "")
+        file_notes = [n for n in pv.get("notes", []) if "OCR" in n]
+        if file_notes:
+            ocr_texts.append(f"【文件 {fname}】\n" + "\n".join(file_notes))
+    return ocr_texts
+
+
+def _publish_bundle(
+    bundle: pipeline_mod.CaseBundle,
+    *,
+    previews: list,
+    source_files: list,
+    message: str | None = None,
+) -> dict:
+    """会话发布 + 统一 import 响应。"""
+    data = bundle.financial_data
+    indicators = [_indicator_row(data, yr) for yr in (data.years or [])]
+    session.replace(
+        data,
+        bundle.ocr_texts,
+        source_files,
+        saved_previews=previews,
+    )
+    summ = session.summary()
+    return bundle.to_import_response(
+        indicators=indicators,
+        previews=previews,
+        summary=summ,
+        message=message,
     )
 
 
@@ -703,53 +796,49 @@ def import_financials(
         for f in files:
             saved.append(_save_upload(f, workdir))
 
-        parsed_years: dict[str, list[int]] = {}
-        if len(saved) == 1:
-            data = _parse_one(str(saved[0]), company_name or "", industry or "制造业")
-            parsed_years[str(saved[0])] = list(data.years or [])
-        else:
-            # 多文件：每份是一整年的完整审计报告，合并成多年数据集。
-            # 串行解析（DeepSeek 并发会触发 API 限流/断连，慢但稳定）。
-            # 任一份解析失败即报错，绝不静默产出缺年的合并结果。
-            parsed: list = []
-            errors: list[str] = []
-            for p in saved:
-                try:
-                    parsed_data = _parse_one(str(p), company_name or "", industry or "制造业")
-                    parsed.append(parsed_data)
-                    parsed_years[str(p)] = list(parsed_data.years or [])
-                except parser_mod.ParserError as e:
-                    errors.append(f"{os.path.basename(str(p))}: {e}")
-                except Exception as e:
-                    errors.append(f"{os.path.basename(str(p))}: {type(e).__name__}: {e}")
-            if errors:
-                raise parser_mod.ParserError(
-                    "以下文件解析失败：" + "；".join(errors)
-                )
-            if parsed:
-                data = parser_mod.merge_years(*parsed)
-            else:
-                # 全部解析失败（如纯扫描件）：用空占位，指标留空，OCR 文本进 session
-                data = parser_mod.make_empty_data(
-                    company_name=company_name or os.path.basename(saved[0]),
-                    industry=industry or "制造业",
-                )
-            if not data.company_name:
-                data.company_name = company_name or os.path.basename(saved[0])
-            if not data.industry:
-                data.industry = industry or "制造业"
-        indicators = [_indicator_row(data, yr) for yr in data.years]
         previews = [_safe_preview(str(p)) for p in saved]
-        # 收集各文件的 OCR 文本，按文件标注，供 AI 逐年识别（保证每年都覆盖）
-        ocr_texts = []
-        for pv in previews:
-            fname = pv.get("name", "")
-            file_notes = [n for n in pv.get("notes", []) if "OCR" in n]
-            if file_notes:
-                ocr_texts.append(
-                    f"【文件 {fname}】\n" + "\n".join(file_notes)
-                )
+        ocr_texts = _collect_ocr_texts(previews)
+        # 先解析拿 years 供 source 元数据（pipeline 内再 parse 一次会重复 AI 调用）
+        # → 改为：pipeline 外预解析，from_data 组装，避免双重 DeepSeek
+        parsed_list = []
+        parsed_years: dict[str, list[int]] = {}
+        errors: list[str] = []
+        for p in saved:
+            try:
+                one = _parse_one(str(p), company_name or "", industry or "制造业")
+                parsed_list.append(one)
+                parsed_years[str(p)] = list(one.years or [])
+            except parser_mod.ParserError as e:
+                errors.append(f"{os.path.basename(str(p))}: {e}")
+            except Exception as e:
+                errors.append(f"{os.path.basename(str(p))}: {type(e).__name__}: {e}")
+        if errors:
+            raise parser_mod.ParserError("以下文件解析失败：" + "；".join(errors))
+        if not parsed_list:
+            data = parser_mod.make_empty_data(
+                company_name=company_name or os.path.basename(saved[0]),
+                industry=industry or "制造业",
+            )
+        elif len(parsed_list) == 1:
+            data = parsed_list[0]
+        else:
+            data = parser_mod.merge_years(*parsed_list)
+        if not data.company_name:
+            data.company_name = company_name or os.path.basename(saved[0])
+        if not data.industry:
+            data.industry = industry or "制造业"
+
         source_files = _source_files(saved, previews, parsed_years)
+        bundle = pipeline_mod.run_case_pipeline_from_data(
+            data,
+            options=pipeline_mod.PipelineOptions(
+                company_name=company_name or data.company_name or "",
+                industry=industry or data.industry or "制造业",
+                case_id=None,
+            ),
+            ocr_texts=ocr_texts,
+            sources=source_files,
+        )
         with workspace_lifecycle_guard():
             if (
                 session.get_version() != captured_version
@@ -762,14 +851,10 @@ def import_financials(
             _queue_retired_sources(
                 captured_sources, workspace, workdir, "session_replaced"
             )
-            session.replace(data, ocr_texts, source_files, saved_previews=previews)
+            response = _publish_bundle(
+                bundle, previews=previews, source_files=source_files
+            )
             published = True
-            response = {
-                "summary": session.summary(),
-                "indicators": indicators,
-                "years": data.years,
-                "previews": previews,
-            }
             _best_effort_drain_workspace_retirements("import")
     except parser_mod.ParserError as e:
         with workspace_lifecycle_guard():
@@ -795,24 +880,166 @@ def import_financials(
 
 @router.post("/import/sample")
 def import_sample() -> dict:
-    """载入内置示例数据（离线）。"""
+    """载入内置示例数据（离线）— 与上传/案例同一 pipeline。"""
     from data.make_sample import build_sample_data
 
     data = parser_mod.parse_financial_dict(build_sample_data())
-    indicators = [_indicator_row(data, yr) for yr in data.years]
+    bundle = pipeline_mod.run_case_pipeline_from_data(
+        data,
+        options=pipeline_mod.PipelineOptions(
+            company_name=data.company_name or "",
+            industry=data.industry or "制造业",
+            case_id="sample",
+        ),
+        ocr_texts=[],
+        sources=[],
+    )
     workspace = _workdir()
     with workspace_lifecycle_guard():
         old_sources = session.get_source_files()
         _queue_retired_sources(old_sources, workspace, None, "sample_replaced")
-        session.replace(data, [], [], saved_previews=[])
-        response = {
-            "summary": session.summary(),
-            "indicators": indicators,
-            "years": data.years,
-            "previews": [],
-        }
+        response = _publish_bundle(bundle, previews=[], source_files=[])
         _best_effort_drain_workspace_retirements("sample")
     return response
+
+
+# ── 标准案例包：扫描 demo_output/cases/*/manifest.json（Phase B）──────────
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@router.get("/import/cases")
+def list_import_cases() -> dict:
+    """列出可一键载入的案例包（manifest 驱动，无硬编码公司逻辑）。"""
+    cases = case_mod.list_cases_public()
+    return {
+        "cases": cases,
+        "hint": (
+            "新增案例：在 demo_output/cases/<id>/ 放置 manifest.json 与文件即可。"
+            "任意企业日常请用 POST /api/import 多文件上传，不必建案例包。"
+        ),
+    }
+
+
+@router.post("/import/case/{case_id}")
+def import_case_pack(case_id: str) -> dict:
+    """一键载入案例包（manifest → 与 /api/import 相同 pipeline）。
+
+    case_id 支持 manifest.id 或 aliases（如 audit_3years → audit_yikang_3y）。
+    任意企业审计：请用正常「财报导入」上传，不依赖案例包。
+    """
+    try:
+        manifest = case_mod.get_manifest(case_id)
+        paths = case_mod.resolve_case_files(manifest)
+    except case_mod.CaseManifestError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    company_name = manifest.company_name or ""
+    industry = manifest.industry or "制造业"
+    tax_hint = manifest.income_tax_nominal_rate
+    canonical_id = manifest.id
+
+    workspace = _workdir()
+    with workspace_lifecycle_guard():
+        captured_version = session.get_version()
+        captured_sources = session.get_source_files()
+    workdir = workspace / f"import-{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=False)
+    saved: list[Path] = []
+    published = False
+    try:
+        for src in paths:
+            dest = workdir / src.name
+            shutil.copy2(src, dest)
+            saved.append(dest)
+
+        previews = [_safe_preview(str(p)) for p in saved]
+        ocr_texts = _collect_ocr_texts(previews)
+        parsed: list = []
+        errors: list[str] = []
+        parsed_years: dict[str, list[int]] = {}
+        for p in saved:
+            try:
+                one = _parse_one(str(p), company_name, industry)
+                if not one.company_name:
+                    one.company_name = company_name
+                if not one.industry:
+                    one.industry = industry
+                parsed.append(one)
+                parsed_years[str(p)] = list(one.years or [])
+            except parser_mod.ParserError as e:
+                errors.append(f"{p.name}: {e}")
+            except Exception as e:
+                errors.append(f"{p.name}: {type(e).__name__}: {e}")
+        if errors:
+            raise parser_mod.ParserError("案例解析失败：" + "；".join(errors))
+        if not parsed:
+            raise parser_mod.ParserError("案例解析结果为空")
+
+        data = parser_mod.merge_years(*parsed) if len(parsed) > 1 else parsed[0]
+        if not data.company_name:
+            data.company_name = company_name
+        if not data.industry:
+            data.industry = industry
+
+        source_files = _source_files(saved, previews, parsed_years)
+        bundle = pipeline_mod.run_case_pipeline_from_data(
+            data,
+            options=pipeline_mod.PipelineOptions(
+                company_name=company_name,
+                industry=industry,
+                case_id=canonical_id,
+                income_tax_nominal_rate=tax_hint,
+            ),
+            ocr_texts=ocr_texts,
+            sources=source_files,
+        )
+        with workspace_lifecycle_guard():
+            if (
+                session.get_version() != captured_version
+                or session.get_source_files() != captured_sources
+            ):
+                raise HTTPException(status_code=409, detail="会话已被另一导入请求更新，请重试")
+            _queue_retired_sources(
+                captured_sources, workspace, workdir, "session_replaced"
+            )
+            response = _publish_bundle(
+                bundle,
+                previews=previews,
+                source_files=source_files,
+                message=None,
+            )
+            published = True
+            summ = response.get("summary") or {}
+            dq = response.get("data_quality") or {}
+            years_s = "/".join(str(y) for y in (bundle.financial_data.years or []))
+            response["message"] = (
+                f"已载入案例 {canonical_id}：{bundle.financial_data.company_name} · "
+                f"{years_s} · 命中科目 {summ.get('matched', 0)}"
+                + (f" · 数据置信度 {dq.get('confidence', '—')}" if dq else "")
+            )
+            response["case_id"] = canonical_id
+            response["case_label"] = manifest.label
+            _best_effort_drain_workspace_retirements("import_case")
+        return response
+    except parser_mod.ParserError as e:
+        with workspace_lifecycle_guard():
+            cleanup_error = None if published else _rollback_new_batch(workdir, workspace)
+        if cleanup_error is not None:
+            raise cleanup_error
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        with workspace_lifecycle_guard():
+            cleanup_error = None if published else _rollback_new_batch(workdir, workspace)
+        if cleanup_error is not None:
+            raise cleanup_error
+        raise
+    except Exception as e:
+        with workspace_lifecycle_guard():
+            cleanup_error = None if published else _rollback_new_batch(workdir, workspace)
+        if cleanup_error is not None:
+            raise cleanup_error
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 @router.get("/import/saved-previews")
@@ -829,10 +1056,22 @@ def get_session() -> dict:
     session.restore_from_db()
     summ = session.summary()
     if summ is None:
-        return {"session": None, "indicators": [], "years": []}
+        return {
+            "session": None,
+            "indicators": [],
+            "years": [],
+            "data_quality": {},
+            "policy": {},
+        }
     data = session.get_data()
     indicators = [_indicator_row(data, yr) for yr in data.years] if data else []
-    return {"session": summ, "indicators": indicators, "years": data.years if data else []}
+    return {
+        "session": summ,
+        "indicators": indicators,
+        "years": data.years if data else [],
+        "data_quality": session.get_data_quality(),
+        "policy": session.get_policy(),
+    }
 
 
 @router.post("/session/clear")

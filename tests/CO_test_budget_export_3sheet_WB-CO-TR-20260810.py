@@ -36,21 +36,89 @@ def test_export_budget_3sheet_matches_template_labels(sample_data, tmp_path):
         "费用预算表",
         "行业企业所得税贡献率参考",
         "诊断与行动清单",
+        "费用合规筹划约束",
     ]
 
     wb = load_workbook(path)
     ref = load_workbook(str(REF))
-    assert wb.sheetnames == ref.sheetnames == meta["sheets"]
+    # 前三 Sheet 与标准模板一致；第四 Sheet 为合规约束（新增）
+    assert wb.sheetnames[:3] == ref.sheetnames == [
+        "费用预算表",
+        "行业企业所得税贡献率参考",
+        "诊断与行动清单",
+    ]
+    assert "费用合规筹划约束" in wb.sheetnames
+    ws_c = wb["费用合规筹划约束"]
+    assert "三条" in str(ws_c["A4"].value or "") or "规则" in str(ws_c["A4"].value or "")
+    assert "历史" in str(ws_c["A4"].value or "") or any(
+        "历史" in str(ws_c.cell(r, 1).value or "") for r in range(1, 40)
+    )
 
     ws, rs = wb["费用预算表"], ref["费用预算表"]
     for coord in ("A1", "A2", "A3", "A4", "A5", "A6", "A12", "A13", "D13", "G13", "I13", "J13"):
         assert ws[coord].value == rs[coord].value, coord
-    # 公式列保留
-    assert str(ws["C4"].value).startswith("=")
-    assert str(ws["E14"].value).startswith("=")
-    assert str(ws["J14"].value).startswith("=")
-    # 顶部有填入
+    # 交付建模：占比/毛利预计算写入（打开即见），恒等 E=D/C6、H=G/C2
     assert float(ws["C2"].value) > 0
+    c2 = float(ws["C2"].value)
+    c6 = float(ws["C6"].value or 0)
+    assert isinstance(ws["C4"].value, (int, float))
+    assert abs(float(ws["C4"].value) - (c2 - float(ws["C3"].value or 0))) < 0.02
+    for r in range(14, 98):
+        d = float(ws.cell(r, 4).value or 0)
+        e = ws.cell(r, 5).value
+        g = float(ws.cell(r, 7).value or 0)
+        h = ws.cell(r, 8).value
+        j = ws.cell(r, 10).value
+        if d > 0 and c6 > 0:
+            assert isinstance(e, (int, float)) and float(e) > 0
+            assert abs(float(e) - d / c6) < 1e-6
+        if g > 0 and c2 > 0:
+            assert isinstance(h, (int, float)) and float(h) > 0
+            assert abs(float(h) - g / c2) < 1e-6
+        if g or float(ws.cell(r, 9).value or 0):
+            assert isinstance(j, (int, float))
+            assert abs(float(j) - (g - float(ws.cell(r, 9).value or 0))) < 0.02
+    # 合计行
+    assert isinstance(ws["G98"].value, (int, float))
+    assert isinstance(ws["H98"].value, (int, float))
+
+
+def test_reconcile_plan_to_financials_aligns_subject_di():
+    """D/I 必须对齐利润表期间费用合计。"""
+    from core import budget as budget_mod
+    from core.models import FinancialData
+
+    plan = budget_mod.make_empty_plan(company_name="对账", industry="建筑业", year=2024)
+    plan.top_inputs.budget_revenue = 100_000_000
+    plan.top_inputs.budget_cost = 80_000_000
+    plan.top_inputs.last_year_revenue = 90_000_000
+    plan.top_inputs.last_year_cost = 72_000_000
+    plan.top_inputs.income_tax_rate = 0.25
+    # 财务科目故意错：D 偏小 G 更小
+    fin = [l for l in plan.lines if l.subject == "财务费用"]
+    fin[0].last_year_actual = 100_000
+    fin[0].budget_amount = 50_000
+    data = FinancialData(
+        company_name="对账",
+        industry="建筑业",
+        years=[2023, 2024],
+        income_statement={
+            "营业收入": {2023: 90_000_000, 2024: 100_000_000},
+            "营业成本": {2023: 72_000_000, 2024: 80_000_000},
+            "销售费用": {2023: 0, 2024: 0},
+            "管理费用": {2023: 5_000_000, 2024: 5_500_000},
+            "研发费用": {2023: 0, 2024: 0},
+            "财务费用": {2023: 2_000_000, 2024: 2_200_000},
+        },
+        balance_sheet={},
+        account_balances={},
+    )
+    notes = budget_export.reconcile_plan_to_financials(plan, data)
+    d_fin = sum(float(l.last_year_actual or 0) for l in plan.lines if l.subject == "财务费用")
+    g_fin = sum(float(l.budget_amount or 0) for l in plan.lines if l.subject == "财务费用")
+    assert abs(d_fin - 2_000_000) < 1
+    assert g_fin > 1_500_000  # 应对齐上年×增长附近
+    assert any("财务" in n for n in notes)
 
 
 def test_export_api_budget_async(sample_data, tmp_path, monkeypatch):

@@ -175,6 +175,26 @@ def get_data() -> Optional[FinancialData]:
         return _data
 
 
+def get_policy() -> dict:
+    """当前会话 PolicySnapshot dict（pipeline 写入 parsed_meta.policy）。"""
+    with _lock:
+        data = _data
+    if data is None:
+        return {}
+    raw = (data.parsed_meta or {}).get("policy")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def get_data_quality() -> dict:
+    """当前会话 data_quality。"""
+    with _lock:
+        data = _data
+    if data is None:
+        return {}
+    raw = (data.parsed_meta or {}).get("data_quality")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
 def clear() -> None:
     """DB 提交成功后才清空内存，确保发布顺序与 replace 一致。"""
     global _data, _ocr_texts, _source_files, _saved_previews, _session_version, _generation
@@ -239,11 +259,23 @@ def summary() -> Optional[dict]:
     if data is None:
         return None
     meta = data.parsed_meta or {}
+    matched = meta.get("matched", 0) or 0
+    # DeepSeek/合并路径若未写 matched，按已解析科目数回退，避免界面显示 0 误导
+    if not matched:
+        n = 0
+        for table in (
+            getattr(data, "income_statement", None) or {},
+            getattr(data, "balance_sheet", None) or {},
+        ):
+            for _acc, yv in table.items():
+                if yv:
+                    n += 1
+        matched = n
     return {
         "company_name": data.company_name,
         "industry": data.industry,
         "years": data.years,
-        "matched": meta.get("matched", 0),
+        "matched": matched,
         "unmatched": list(meta.get("unmatched", [])),
         "warnings": list(meta.get("warnings", [])),
         "latest_year": data.latest_year(),

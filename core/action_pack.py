@@ -302,7 +302,7 @@ def _build_action_calc_sheet(wb, openpyxl, Font, PatternFill, Alignment, Border,
         # 数字格式
         for ci in (4, 5, 6, 7, 8, 9):
             ws.cell(row=r, column=ci).number_format = '#,##0.00'
-        ws.cell(row=r, column=10).number_format = '0.00%'
+        ws.cell(row=r, column=10).number_format = '0.0000%'
         ws.cell(row=r, column=11).number_format = '0.00'
 
     # 合计行

@@ -39,6 +39,7 @@ class BudgetJob:
     path: str = ""
     filename: str = ""
     meta: dict = field(default_factory=dict)
+    advice_items: list = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     finished_at: float = 0.0
 
@@ -56,6 +57,8 @@ class BudgetJob:
                 "top_method": self.meta.get("top_method"),
                 "line_method": self.meta.get("line_method"),
                 "filled_lines": self.meta.get("filled_lines"),
+                "advice_applied": self.meta.get("advice_applied", False),
+                "advice_selected": self.meta.get("advice_selected", 0),
                 "notes": self.meta.get("notes", [])[-8:],
             },
         }
@@ -197,7 +200,20 @@ def _run_job(job_id: str) -> None:
                 message=f"费用行 AI 未命中（{line_err or '空'}），规则补齐后写表…",
             )
 
-        _update(job, stage="write", progress=85, message="写出费用预算三表…")
+        advice_n = len(job.advice_items or [])
+        if advice_n:
+            _update(
+                job,
+                stage="apply_advice",
+                progress=82,
+                message=f"写入 Web 编制建议 {advice_n} 条（金额已由 DeepSeek 分析）…",
+            )
+        _update(
+            job,
+            stage="write",
+            progress=88,
+            message="本地建模写表：占比/毛利率用公式计算（导出不再二次 DeepSeek）…",
+        )
         _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
         years = sorted(data.years or [])
         yspan = f"{years[0]}-{years[-1]}" if len(years) > 1 else (str(years[0]) if years else "")
@@ -212,13 +228,17 @@ def _run_job(job_id: str) -> None:
             top_indicators=top_indicators,
             line_allocations=line_allocations or None,
             period_totals=period,
+            advice_items=job.advice_items or None,
         )
+        msg = f"完成：非空费用行 {meta.get('filled_lines', 0)}/84"
+        if meta.get("advice_applied"):
+            msg += f" · 已自动填入编制建议 {meta.get('advice_selected', 0)} 项"
         _update(
             job,
             status="completed",
             stage="completed",
             progress=100,
-            message=f"完成：非空费用行 {meta.get('filled_lines', 0)}/84",
+            message=msg,
             path=out_path,
             filename=filename,
             meta=meta,
@@ -237,13 +257,56 @@ def _run_job(job_id: str) -> None:
         )
 
 
-def start_budget_export_job() -> dict:
+def start_budget_export_job(advice_items: Optional[list] = None) -> dict:
+    """启动预算三表导出。
+
+    advice_items：可选，费用编制建议勾选项；写出前自动填入 F/G（及占比公式）。
+    若未传 items，尝试复用本会话最近一次 DeepSeek 编制建议（避免前端漏传导致全 0）。
+    """
     data = session.get_data()
     if data is None:
         raise ValueError("尚未导入财报")
     version = session.get_version()
     job_id = f"budget-{uuid.uuid4().hex[:12]}"
-    job = BudgetJob(job_id=job_id, session_version=version, message="已排队")
+    if not advice_items:
+        try:
+            budget_api = importlib.import_module("web_backend.CO_budget_WB-CO-TR-20260805160732")
+            last = getattr(budget_api, "_last_advice", None) or {}
+            if last.get("session_version") == version:
+                advice_items = (last.get("payload") or {}).get("suggestions") or []
+        except Exception:
+            advice_items = advice_items or []
+    cleaned: list[dict] = []
+    for it in advice_items or []:
+        if not isinstance(it, dict):
+            continue
+        if not it.get("selected", True):
+            continue
+        try:
+            row = int(it.get("row"))
+        except (TypeError, ValueError):
+            continue
+        cleaned.append(
+            {
+                "row": row,
+                "reference_amount": float(it.get("reference_amount") or 0),
+                "budget_amount": float(it.get("budget_amount") or 0),
+                "has_last_year": bool(it.get("has_last_year")),
+                "last_year_actual": float(it.get("last_year_actual") or 0),
+                "selected": True,
+                "write_last_year": False,
+                "subject": str(it.get("subject") or ""),
+                "expense_name": str(it.get("expense_name") or ""),
+                "invoice_name": str(it.get("invoice_name") or ""),
+                "reason": str(it.get("reason") or ""),
+            }
+        )
+    job = BudgetJob(
+        job_id=job_id,
+        session_version=version,
+        message="已排队" + (f" · 将填入 {len(cleaned)} 条编制建议" if cleaned else ""),
+        advice_items=cleaned,
+    )
     with _lock:
         # 取消同会话旧 running 任务标记（新任务覆盖）
         for old in list(_jobs.values()):

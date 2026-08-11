@@ -257,6 +257,10 @@ def _map_deepseek_result(
         warnings.append("未解析到利润表科目")
     if not balance:
         warnings.append("未解析到资产负债表科目")
+    # 统计命中科目数（供会话摘要 matched 显示；DeepSeek 路径原先缺省为 0）
+    matched = sum(1 for acc, yv in income.items() if yv) + sum(
+        1 for acc, yv in balance.items() if yv
+    )
     data = FinancialData(
         company_name=str(company),
         industry=industry or "制造业",
@@ -268,6 +272,9 @@ def _map_deepseek_result(
             "source": "deepseek",
             "warnings": warnings,
             "report_year": year,
+            "matched": matched,
+            "unmatched": [],
+            "path": os.path.basename(path) if path else "",
         },
     )
     return data
