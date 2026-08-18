@@ -1,0 +1,19 @@
+{
+  "id": "audit_yikang_3y",
+  "aliases": ["audit_3years", "yikang"],
+  "label": "艺康三年审计（演示）",
+  "description": "云南艺康装饰 2022–2024 年审计报告。仅演示；与手动上传多份年报使用同一 pipeline。PDF 可放在本目录或上级「测试文件」。",
+  "company_name": "云南艺康装饰工程有限公司",
+  "industry": "建筑业",
+  "files": [
+    { "path": "2022年审计报告.pdf", "report_year": 2022 },
+    { "path": "2023年审计报告.pdf", "report_year": 2023 },
+    { "path": "2024年审计报告.pdf", "report_year": 2024 }
+  ],
+  "defaults": {
+    "income_tax_nominal_rate": 0.15,
+    "notes": "2022 附注高新减按 15%；非业务硬编码，可被上传表单覆盖"
+  },
+  "gold": "gold.json",
+  "tags": ["demo", "construction", "scan+text"]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "利润宝-web-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "利润宝 · 本机 Web 前端外壳（React + Vite）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test:e2e": "node e2e/CO_run_playwright_WB-CO-TR-20260807113737.mjs",
+    "test:e2e-runner": "node runner_tests/CO_verify_e2e_runner_WB-CO-TR-20260807113737.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.45.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.3"
+  }
+}

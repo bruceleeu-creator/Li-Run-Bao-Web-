@@ -1,0 +1,49 @@
+#!/bin/bash
+#
+# 利润宝 · pre-commit Hook
+# 提交前自动运行项目守护者检查
+#
+# 安装方式：
+#   方式 A（推荐）：ln -sf ../../.hooks/pre-commit .git/hooks/pre-commit
+#   方式 B：cp .hooks/pre-commit .git/hooks/pre-commit
+#
+# 跳过检查：git commit --no-verify 或 -n
+#
+# 智能体标识：WB-CO-TR-20260717
+
+echo ""
+echo "🔍 利润宝 · pre-commit 检查中..."
+echo ""
+
+# 获取项目根目录
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ $? -ne 0 ]; then
+    echo "⚠️  无法确定项目根目录，跳过检查"
+    exit 0
+fi
+
+GUARDIAN="$PROJECT_ROOT/.hooks/project_guardian.py"
+
+if [ ! -f "$GUARDIAN" ]; then
+    echo "⚠️  未找到 $GUARDIAN，跳过检查"
+    exit 0
+fi
+
+# 运行自检脚本（快速模式，仅检查新提交/修改的文件相关项）
+python3 "$GUARDIAN" --quick
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 2 ]; then
+    echo ""
+    echo "❌ 提交被阻止：存在必须修复的错误"
+    echo "   修复后重新提交，或使用 git commit --no-verify 强制提交"
+    exit 1
+elif [ $EXIT_CODE -eq 1 ]; then
+    echo ""
+    echo "⚠️  提交通过（有警告，建议关注）"
+    exit 0
+else
+    echo ""
+    echo "✅ 检查通过"
+    exit 0
+fi
