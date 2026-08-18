@@ -1,6 +1,6 @@
 # 利润宝 · 项目记忆（AGENTS.md）
 
-> 更新：2026-08-18 v25 | 经营预算分析链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」（onSummarize 在 selectedFiles 为空〔如「已保存预览」〕时静默跳过自动导入 → 改为明确警告 + 按钮文案如实 + 选新文件重置状态）；v24 数字质检引擎（core/numeric_audit 双层防护）+ 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源）
+> 更新：2026-08-18 v25 | 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」（onSummarize 在 selectedFiles 为空〔如「已保存预览」〕时静默跳过自动导入 → 改为明确警告 + 按钮文案如实 + 选新文件重置状态）；UI 名称统一「经营分析报告」，README 交付物/闭环/3.6 导出交付小节同步重写；v24 数字质检引擎（core/numeric_audit 双层防护）+ 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源）
 
 ---
 
@@ -168,6 +168,8 @@
 - **检查脚本**：`环境检查`（退出码 0 通过/1 警告/2 阻断）、`质量检查`（pytest 全量 + make_sample + /api/health + guardian --quick + check.sh）
 - **故障排查**：① Gatekeeper 拦 .command → 右键打开；② 找不到 Python 3.11+ → `brew install python@3.12` 或 `export LRB_PYTHON=...`；③ 缺前端产物 → `cd web_frontend && npm install && npm run build`；④ 扫描件提示配 AI → 设置页填 Base URL/模型/Key；⑤ 真实模板验收 → `export LRB_REAL_TEMPLATE_PATH=...` 跑 test_t7_acceptance（未设自动跳过）
 - **发布**：历史 v1.0.0 用「构建发布包」脚本产出 release/+ZIP+SHA-256 并扫敏感字符串（该脚本现不在 scripts/，需发布时重建）；发布包排除 .git/.venv/缓存/AI 配置/过程文件
+- **GitHub 仓库（2026-08-18 起推送）**：`origin=https://github.com/bruceleeu-creator/Li-Run-Bao-Web-.git`（gh CLI 已登录 bruceleeu-creator，main 直推）；推送流程=清缓存（`__pycache__`/`.pytest_cache`/`node_modules/.vite`）→ guardian --quick → `git add -A && git commit && git push origin main`；`.ai_config.json`（API Key）/运行时 DB（根目录与 workspaces 的 app.db）/workspaces 用户上传文件均被 .gitignore 挡住，仅放行三个 e2e 夹具 xlsx；根目录误生成的空 `app.db` 2026-08-18 已补 ignore
+- **git 代理坑**：本机 git 配了 `http.proxy=127.0.0.1:7890`（Clash 类），代理未运行时 push 报 `Failed to connect to 127.0.0.1 port 7890`——绕过：`git -c http.proxy= -c https.proxy= push origin main`；或先启动代理再常规 push
 
 ## 验收记录（T8 最终独立验收，2026-07-26）
 - **结论：通过（CO Gate 8 签字），允许作为 v1.0 本地可用版本交付**
