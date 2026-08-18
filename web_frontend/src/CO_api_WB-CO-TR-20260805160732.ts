@@ -301,10 +301,53 @@ export interface ExportStatus {
   data_quality?: import("./CO_types_WB-CO-TR-20260805160732").DataQuality;
   policy?: import("./CO_types_WB-CO-TR-20260805160732").PolicySnapshot;
   require_confirm?: boolean;
+  analysis_ready?: boolean;
 }
 
 export async function fetchExportStatus(): Promise<ExportStatus> {
   return request("/api/export/status");
+}
+
+// ── 经营预算分析（前世今生 · DeepSeek 先行，Word/PDF 后导） ─────────────
+
+export interface ReportAnalysisStage {
+  title: string;
+  summary: string;
+  bullets: string[];
+}
+
+export interface ReportAnalysisPoint {
+  title: string;
+  body: string;
+}
+
+export interface ReportAnalysisResponse {
+  company_name: string;
+  years: number[];
+  one_liner: string;
+  headline: string;
+  stage_insight: string;
+  stages: ReportAnalysisStage[];
+  now_points: ReportAnalysisPoint[];
+  now_judgments: Record<string, string>;
+  future_actions: string[];
+  ai_summary: string;
+  number_warnings: string[];
+  mode: string;
+}
+
+/** 生成经营预算分析：DeepSeek 把事实清单改写为前世今生文案（数字白名单校验） */
+export async function generateReportAnalysis(): Promise<ReportAnalysisResponse> {
+  return request("/api/export/analysis", { method: "POST" });
+}
+
+/** 最近一次经营预算分析（同会话）；无则 404 */
+export async function fetchReportAnalysisLast(): Promise<ReportAnalysisResponse | null> {
+  try {
+    return await request("/api/export/analysis/last");
+  } catch {
+    return null;
+  }
 }
 
 function triggerBlobDownload(blob: Blob, filename: string) {

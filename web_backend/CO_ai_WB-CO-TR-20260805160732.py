@@ -2347,3 +2347,65 @@ def advise_budget_expenses(context: dict) -> tuple[list[dict], str, str]:
     if errors:
         summary = (summary + f" （部分科目重试提示：{';'.join(errors[:3])}）").strip()
     return list(merged.values()), summary, ""
+
+
+def analyze_operating_narrative(context: dict) -> tuple[dict, str, str]:
+    """DeepSeek 经营预算分析（前世今生文案，主路径）。
+
+    输入 factsheet 为确定性事实清单；DeepSeek 只做「艺康体小白版」改写，
+    禁止编造数字。返回 (analysis_dict, ai_summary, error)。
+    数字白名单校验由 core.CO_report_analysis 负责（只提示不拦截）。
+    """
+    engine = _engine(timeout=180.0)
+    if engine is None:
+        return {}, "", "大模型未配置。经营分析报告需 DeepSeek 介入，请先在设置中配置 API Key。"
+
+    facts = context.get("factsheet") or {}
+    if not facts:
+        return {}, "", "事实清单为空（尚未导入财报或叙事构建失败）"
+
+    stage_titles = [str(s.get("title") or "") for s in facts.get("stages") or []]
+    point_titles = [str(p.get("title") or "") for p in facts.get("now_points") or []]
+    metric_names = [str(k) for k in (facts.get("metric_judgments") or {}).keys()]
+
+    system = (
+        "你是中国中小企业 CFO 兼财务写作顾问，为「艺康体小白版」经营预算分析报告写文案："
+        "用老板看得懂的大白话，讲清公司的前世今生（最以前 → 中间 → 现在）与将来怎么干。"
+        "硬性规则："
+        "1) 所有数字（金额、比率、年份、评分）只能引用【事实清单】中已有的数字，"
+        "一个都不许编造、不许改写数值；"
+        "2) stages 数量与标题、now_points 标题、指标名称必须与事实清单完全一致，只写正文；"
+        "3) one_liner ≤80 字；headline 2~4 句（句号分隔）；每个 stage summary 2~4 句、"
+        "bullets 3~5 条；now_points 每段 2~4 句；future_actions 4~8 条、每条 ≤100 字；"
+        "4) 口径：先说结论再讲故事；讲清「收入-利润-税负-现金」的因果；"
+        "不承诺节税金额超出事实清单；限于合法税务筹划；"
+        "5) 只返回 JSON："
+        '{"one_liner":"...","headline":"...","stage_insight":"...",'
+        '"stages":[{"title":"...","summary":"...","bullets":["..."]}],'
+        '"now_points":[{"title":"...","body":"..."}],'
+        '"now_judgments":{"指标名":"管理判断一句话"},'
+        '"future_actions":["..."],"summary":"..."}'
+    )
+
+    facts_json = json.dumps(facts, ensure_ascii=False)
+    user = (
+        f"【事实清单（唯一数字来源，禁止编造）】\n{facts_json[:24_000]}\n\n"
+        f"【阶段标题（必须原样返回 {len(stage_titles)} 个）】{'；'.join(stage_titles)}\n"
+        f"【现在要点标题（必须原样返回 {len(point_titles)} 个）】{'；'.join(point_titles)}\n"
+        f"【指标名（now_judgments 的键，只用这些）】{'；'.join(metric_names)}\n"
+        "请基于以上事实写出经营预算分析文案 JSON（不要输出 JSON 以外的文字）。"
+    )
+
+    try:
+        content = engine.chat(user, system_prompt=system, max_tokens=6_000)
+        obj = _parse_budget_json(content)
+    except AIEngineError as e:
+        return {}, "", f"DeepSeek 调用失败：{e}"
+    except Exception as e:
+        return {}, "", f"DeepSeek 返回解析失败：{type(e).__name__}: {e}"
+
+    if not isinstance(obj, dict):
+        return {}, "", "DeepSeek 返回非对象"
+    summary = str(obj.get("summary") or "").strip()
+    return obj, summary[:400], ""
+

@@ -12,6 +12,11 @@
 - POST /api/export/excel   成本优化测算模型（行动包）
 - POST /api/export/budget  三 Sheet 费用预算模板（DeepSeek 可选填充）
 - GET  /api/export/status  是否可导出 + 预览摘要
+
+经营预算分析链路（与费用编制建议同一模式：先 DeepSeek 分析 → 再导出填入）：
+- POST /api/export/analysis       DeepSeek 写「前世今生」文案（数字白名单校验）
+- GET  /api/export/analysis/last  最近一次分析（同会话）
+Word/PDF 导出时自动把最近分析合并进叙事模板（表格/折线图不动）。
 """
 
 from __future__ import annotations
@@ -39,11 +44,17 @@ session = importlib.import_module("web_backend.CO_session_WB-CO-TR-2026080516073
 db = importlib.import_module("web_backend.CO_db_WB-CO-TR-20260805160732")
 interaction = importlib.import_module("web_backend.CO_interaction_WB-CO-TR-20260805160732")
 budget_export = importlib.import_module("core.CO_budget_export_WB-CO-TR-20260810")
+ai_mod = importlib.import_module("web_backend.CO_ai_WB-CO-TR-20260805160732")
+report_analysis = importlib.import_module("core.CO_report_analysis_WB-CO-TR-20260818")
+from core.narrative import build_stage_narrative  # noqa: E402
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 logger = logging.getLogger(__name__)
 
 _EXPORT_DIR = Path(__file__).resolve().parent / "workspaces" / "exports"
+
+# 最近一次经营预算分析（内存态，按会话版本匹配；与 CO_budget._last_advice 同模式）
+_last_analysis: dict = {}
 
 
 def _safe_filename(name: str) -> str:
@@ -192,6 +203,10 @@ def export_status() -> dict:
     dq = session.get_data_quality() if hasattr(session, "get_data_quality") else {}
     policy = session.get_policy() if hasattr(session, "get_policy") else {}
     require_confirm = bool((dq or {}).get("require_confirm") or (dq or {}).get("confidence") == "low")
+    analysis_ready = (
+        _last_analysis.get("session_version") == session.get_version()
+        and report_analysis.has_analysis_content((_last_analysis or {}).get("payload") or {})
+    )
     return {
         "ready": True,
         "unlocked": unlocked,
@@ -206,16 +221,87 @@ def export_status() -> dict:
         "data_quality": dq or {},
         "policy": policy or {},
         "require_confirm": require_confirm,
+        "analysis_ready": analysis_ready,
     }
+
+
+# ── 经营预算分析（前世今生 · DeepSeek 先行，Word/PDF 后导） ──────────────
+
+
+@router.post("/analysis")
+def generate_report_analysis() -> dict:
+    """DeepSeek 经营预算分析：把确定性事实清单改写为小白版文案。
+
+    数字白名单校验：文案中出现事实清单外的数字时返回 number_warnings
+    （只提示，绝不静默改数）。结果存内存，Word/PDF 导出自动合并。
+    """
+    global _last_analysis
+    sess = _build_session(require_final=False)
+    facts = report_analysis.build_analysis_factsheet(sess.data, sess.diagnosis, sess.decisions)
+    obj, summary, ai_error = ai_mod.analyze_operating_narrative({"factsheet": facts})
+    if not obj:
+        raise HTTPException(
+            status_code=503,
+            detail=ai_error or "DeepSeek 未返回经营预算分析，请检查 AI 配置后重试",
+        )
+    payload = report_analysis.normalize_analysis_payload(obj)
+    if not report_analysis.has_analysis_content(payload):
+        raise HTTPException(
+            status_code=503,
+            detail="DeepSeek 返回的经营预算分析为空，请重试",
+        )
+    if summary and not payload.get("ai_summary"):
+        payload["ai_summary"] = summary
+    payload["company_name"] = facts.get("company_name") or sess.data.company_name
+    payload["years"] = list(sess.data.years or [])
+    payload["number_warnings"] = report_analysis.validate_analysis_numbers(payload, facts)
+    payload["mode"] = "deepseek"
+    _last_analysis = {
+        "session_version": session.get_version(),
+        "payload": payload,
+    }
+    return payload
+
+
+@router.get("/analysis/last")
+def last_report_analysis() -> dict:
+    """最近一次经营预算分析（同会话）；无则 404。"""
+    if (
+        not _last_analysis
+        or _last_analysis.get("session_version") != session.get_version()
+    ):
+        raise HTTPException(status_code=404, detail="尚无经营预算分析，请先生成")
+    return _last_analysis["payload"]
+
+
+def _merged_narrative(sess: iv_mod.Session) -> Optional[object]:
+    """最近一次 DeepSeek 经营预算分析（同会话）合并进规则叙事；无则 None。
+
+    只覆盖文本字段；跨年表/指标表/折线图等数字内容不受影响。
+    """
+    stored = (_last_analysis or {}).get("payload") or {}
+    if (
+        _last_analysis.get("session_version") != session.get_version()
+        or not report_analysis.has_analysis_content(stored)
+    ):
+        return None
+    try:
+        base = build_stage_narrative(sess.data, sess.diagnosis, sess.decisions)
+        return report_analysis.merge_narrative(base, stored)
+    except Exception:
+        logger.exception("经营预算分析合并失败，回退规则叙事")
+        return None
 
 
 @router.post("/word")
 def export_word() -> FileResponse:
-    """导出艺康体 Word 经营业绩分析与建议。"""
+    """导出艺康体 Word 经营业绩分析与建议（含 DeepSeek 经营预算分析文案）。"""
     sess = _build_session(require_final=True)
     path = _output_path(".docx", sess.data.company_name, sess.data.years)
     try:
-        report_mod.export_word(sess, str(path), ai_fallback=sess.ai_fallback_message)
+        report_mod.export_word(
+            sess, str(path), ai_fallback=sess.ai_fallback_message, narrative=_merged_narrative(sess)
+        )
     except report_mod.ReportError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:
@@ -230,11 +316,13 @@ def export_word() -> FileResponse:
 
 @router.post("/pdf")
 def export_pdf() -> FileResponse:
-    """导出 PDF 报告。"""
+    """导出 PDF 报告（与 Word 同一份内容）。"""
     sess = _build_session(require_final=True)
     path = _output_path(".pdf", sess.data.company_name, sess.data.years)
     try:
-        report_mod.export_pdf(sess, str(path), ai_fallback=sess.ai_fallback_message)
+        report_mod.export_pdf(
+            sess, str(path), ai_fallback=sess.ai_fallback_message, narrative=_merged_narrative(sess)
+        )
     except report_mod.ReportError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception as e:

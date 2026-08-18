@@ -52,6 +52,10 @@ web_backend/workspaces/*
 !web_backend/workspaces/2022年审计报告.xlsx
 !web_backend/workspaces/2023年审计报告.xlsx
 
+# 运行时 SQLite（根目录误生成的空库同样不入库）
+app.db
+*.db.lock
+
 # Output
 # demo_output/ 默认全部忽略，仅精确放行正式发布的示例产物（xlsx/docx/pdf/png）
 demo_output/*

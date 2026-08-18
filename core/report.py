@@ -179,13 +179,21 @@ def _add_callout_table(doc, text: str, fill: str = "FFF3CD") -> None:
     doc.add_paragraph("")
 
 
-def export_word(sess: Session, path: str, ai_fallback: str = "") -> str:
+def export_word(
+    sess: Session,
+    path: str,
+    ai_fallback: str = "",
+    narrative: Optional[StageNarrative] = None,
+) -> str:
     """生成艺康体小白版 Word 经营分析报告（.docx）。
 
     结构对齐《艺康装饰经营业绩分析与建议》：
     封面 → 一句话结论 → 先说结论 → 跨年表 → 最以前/中间/现在 →
     关键指标白话 → 将来建议 → 月度看板 → 落地清单 → 口径说明 →
     附录（诊断发现 + 互动决策）。
+
+    narrative：可选的已合并叙事（DeepSeek 经营预算分析覆盖文本字段）；
+    不传时用规则引擎叙事。表格/折线图等数字内容始终来自会话数据。
     """
     try:
         from docx import Document
@@ -205,7 +213,7 @@ def export_word(sess: Session, path: str, ai_fallback: str = "") -> str:
         except Exception:
             pass
 
-        narr = _session_narrative(sess)
+        narr = narrative if narrative is not None else _session_narrative(sess)
         years = list(sess.data.years or [])
         year_span = (
             f"{min(years)}-{max(years)}" if years else datetime.now().strftime("%Y")
@@ -539,8 +547,17 @@ def _clean_pdf_text(text: str) -> str:
     )
 
 
-def export_pdf(sess: Session, path: str, ai_fallback: str = "") -> str:
-    """生成 PDF 报告。返回路径；失败抛 ReportError。"""
+def export_pdf(
+    sess: Session,
+    path: str,
+    ai_fallback: str = "",
+    narrative: Optional[StageNarrative] = None,
+) -> str:
+    """生成 PDF 报告。返回路径；失败抛 ReportError。
+
+    narrative：可选的已合并叙事（与 Word 同一份内容）；
+    不传时用规则引擎叙事。指标表/折线图始终来自会话数据。
+    """
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib import colors
@@ -568,7 +585,7 @@ def export_pdf(sess: Session, path: str, ai_fallback: str = "") -> str:
         title_style = ParagraphStyle("TitleCJK", parent=styles["Title"], fontName=cjk_font, fontSize=22, leading=30, alignment=1, textColor=colors.HexColor("#1e3a8a"))
 
         story = []
-        narr = _session_narrative(sess)
+        narr = narrative if narrative is not None else _session_narrative(sess)
         # 封面
         story.append(Paragraph("利润宝 · 企业财税优化方案", title_style))
         story.append(Spacer(1, 0.5 * cm))

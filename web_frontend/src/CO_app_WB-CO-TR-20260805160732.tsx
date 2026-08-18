@@ -26,6 +26,8 @@ import {
   downloadExport,
   downloadBudgetExportAsync,
   generateBudgetAdvice,
+  generateReportAnalysis,
+  fetchReportAnalysisLast,
   fetchExportStatus,
   saveAIConfig,
   startInteraction,
@@ -37,6 +39,7 @@ import {
   type AIReportJob,
   type BudgetAdviceItem,
   type BudgetAdviceResponse,
+  type ReportAnalysisResponse,
 } from "./CO_api_WB-CO-TR-20260805160732";
 import type {
   DataQuality,
@@ -235,9 +238,14 @@ const NAV_ITEMS: readonly { key: Workspace; label: string; group: string }[] = [
   { key: "settings", label: "设置", group: "系统" },
 ];
 
-const EXPORT_ITEMS: readonly ExportDeliverable[] = [
-  { id: "w", name: "导出 Word 报告", format: "Word", enabled: false, note: "完成诊断与互动后可用" },
-  { id: "p", name: "导出 PDF 报告", format: "PDF", enabled: false, note: "完成诊断与互动后可用" },
+/** ① 经营分析报告：Word/PDF 是同一份内容，先生成 DeepSeek 分析再导出 */
+const ANALYSIS_EXPORT_ITEMS: readonly ExportDeliverable[] = [
+  { id: "w", name: "导出经营分析报告（Word）", format: "Word", enabled: false, note: "先①分析 → 导出自动填入" },
+  { id: "p", name: "导出经营分析报告（PDF）", format: "PDF", enabled: false, note: "与 Word 同一份内容" },
+] as const;
+
+/** ② 测算模型与费用预算三表：Excel 交付，须先完成费用编制建议 */
+const BUDGET_EXPORT_ITEMS: readonly ExportDeliverable[] = [
   { id: "e", name: "导出测算模型", format: "Excel", enabled: false, note: "完成诊断与互动后可用" },
   {
     id: "b",
@@ -1041,6 +1049,8 @@ function ImportSection({
   const [previewErr, setPreviewErr] = useState("");
   const [aiMarkdown, setAiMarkdown] = useState("");
   const [aiLocalBusy, setAiLocalBusy] = useState(false);
+  // 整理成功但无原始文件可自动导入（如「已保存预览」）时的明确警告
+  const [aiSkipImportWarn, setAiSkipImportWarn] = useState("");
   // AI 整理分阶段提示（多文件时逐年分析 → 最后合并）
   const [aiStage, setAiStage] = useState("");
   const [aiLocalError, setAiLocalError] = useState("");
@@ -1096,6 +1106,7 @@ function ImportSection({
     setAiLocalBusy(true);
     setAiLocalError("");
     setAiMarkdown("");
+    setAiSkipImportWarn("");
     // 多文件时提示按年独立分析（后端分阶段处理：每份提炼 → 合并）
     const fileCount = previews.length;
     setAiStage(
@@ -1107,9 +1118,14 @@ function ImportSection({
       const resp = await summarizePreview(parts.join("\n"));
       setAiMarkdown(resp.markdown);
       // 整理完成即自动导入：写入会话并生成「导入记录」卡片（整理结果由后端
-      // 自动保存到「报告记录」，点击导入记录卡片即可恢复经营概况）
+      // 自动保存到「报告记录」，点击导入记录卡片即可恢复经营概况）。
+      // 无原始文件（如「已保存预览」）时不能静默跳过——必须明确告知用户。
       if (selectedFiles.length > 0) {
         void runImport(selectedFiles);
+      } else {
+        setAiSkipImportWarn(
+          "整理结果已保存到「报告记录」，但当前展示的是已保存预览、没有原始文件可自动导入，因此未生成导入记录。请在上方重新选择或拖入文件，点击「开始导入」完成导入。",
+        );
       }
     } catch (e) {
       setAiLocalError(e instanceof Error ? e.message : String(e));
@@ -1170,6 +1186,7 @@ function ImportSection({
     setBusy(true);
     setError("");
     setNotice("");
+    setAiSkipImportWarn("");
     try {
       const resp = await importFiles(files, companyName, industry);
       onImported(resp);
@@ -1204,6 +1221,7 @@ function ImportSection({
     setSelectedFiles(files);
     setPreviews(null);
     setShowSavedPreview(false);
+    setAiSkipImportWarn("");
     setPreviewErr("");
     setAiMarkdown("");
     setAiLocalError("");
@@ -1236,6 +1254,7 @@ function ImportSection({
     setSelectedFiles(files);
     setPreviews(null);
     setShowSavedPreview(false);
+    setAiSkipImportWarn("");
     setError("");
     // 拖入后先识别企业名称与行业（不阻塞导入；识别结果填入表单供确认）
     void autoIdentify(files, null);
@@ -1421,9 +1440,17 @@ function ImportSection({
                 className="btn btn--ai"
                 disabled={aiLocalBusy || !previews}
                 onClick={() => void onSummarize()}
-                title="整理完成会自动导入并写入导入记录；整理结果保存到报告记录"
+                title={
+                  selectedFiles.length > 0
+                    ? "整理完成会自动导入并写入导入记录；整理结果保存到报告记录"
+                    : "当前预览没有原始文件（如「已保存预览」），整理后不会自动导入，需重新选择文件再导入"
+                }
               >
-                {aiLocalBusy ? "AI 整理中…" : "AI 整理并导入"}
+                {aiLocalBusy
+                  ? "AI 整理中…"
+                  : selectedFiles.length > 0
+                    ? "AI 整理并导入"
+                    : "AI 整理（预览无文件，不会自动导入）"}
               </button>
               {aiStage ? (
                 <span className="ai-stage" role="status">{aiStage}</span>
@@ -1451,6 +1478,16 @@ function ImportSection({
 
           {aiError ? <div className="status status--error">{aiError}</div> : null}
           {aiLocalError ? <div className="status status--error">{aiLocalError}</div> : null}
+          {aiSkipImportWarn ? (
+            <div className="status status--warn" role="alert">
+              {aiSkipImportWarn}
+            </div>
+          ) : null}
+          {showSavedPreview && previews && !aiSkipImportWarn ? (
+            <div className="status status--warn">
+              正在查看「已保存预览」——仅供查看，不含原始文件；重新选择或拖入文件后才能导入并生成导入记录。
+            </div>
+          ) : null}
           {aiMarkdown ? (
             <div className="ai-result">
               <h4 className="ai-result__title">AI 整理结果</h4>
@@ -2060,7 +2097,11 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
   const [error, setError] = useState("");
   const [statusNote, setStatusNote] = useState("");
   const [budgetProgress, setBudgetProgress] = useState("");
-  // 流程：先 DeepSeek 编制建议 → 再导出三表并自动填入
+  // 流程（有顺序）：① DeepSeek 经营分析报告 → 导出 Word/PDF（同一份内容）
+  //                ② DeepSeek 费用编制建议 → 导出测算模型/预算三表
+  const [analysis, setAnalysis] = useState<ReportAnalysisResponse | null>(null);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
+  const [analysisNote, setAnalysisNote] = useState("");
   const [advice, setAdvice] = useState<BudgetAdviceResponse | null>(null);
   const [adviceItems, setAdviceItems] = useState<BudgetAdviceItem[]>([]);
   const [adviceBusy, setAdviceBusy] = useState(false);
@@ -2088,7 +2129,37 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
       .catch(() => {
         /* ignore */
       });
+    // 恢复最近一次经营分析报告（同会话），刷新页面不丢
+    void fetchReportAnalysisLast().then((a) => {
+      if (a) {
+        setAnalysis(a);
+        setAnalysisNote("已载入最近一次经营分析报告，可直接导出 Word/PDF。");
+      }
+    });
   }, [session.session, session.data_quality, unlocked]);
+
+  const loadAnalysis = async () => {
+    setAnalysisBusy(true);
+    setError("");
+    setAnalysisNote("DeepSeek 正在撰写经营分析报告（前世今生，按科目分句校对数字）…");
+    try {
+      const resp = await generateReportAnalysis();
+      setAnalysis(resp);
+      const warn = resp.number_warnings?.length
+        ? ` ⚠ 数字核对提示：${resp.number_warnings.join("；")}`
+        : "";
+      setAnalysisNote(
+        `分析已就绪：导出 Word/PDF 时自动填入（同一份内容两种格式）。${resp.ai_summary || ""}${warn}`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setAnalysisNote("需要已配置 DeepSeek。请到「设置」填写 API Key 后重试。");
+    } finally {
+      setAnalysisBusy(false);
+    }
+  };
+
+  const analysisReady = Boolean(analysis);
 
   const loadAdvice = async () => {
     setAdviceBusy(true);
@@ -2123,6 +2194,14 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
     if (requireConfirm && !qualityAck) {
       setError("数据置信度偏低或勾稽有警告：请勾选「已人工核验关键金额」后再导出。");
       return;
+    }
+    // Word/PDF：必须先生成经营分析报告（文案由 DeepSeek 分析后填入）
+    if (kind === "word" || kind === "pdf") {
+      if (!analysis) {
+        setError("请先生成「经营分析报告」，Word/PDF 导出时会把分析文案自动填入。");
+        document.getElementById("report-analysis")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
     }
     if (kind === "budget") {
       const picked = adviceItems.filter((i) => i.selected);
@@ -2196,7 +2275,10 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
     <section className="panel">
       <h2 className="panel__title">第二稿与导出</h2>
       <p className="panel__note">
-        Word 采用「艺康体」小白版结构：先说结论 → 最以前/中间/现在 → 关键指标白话 → 将来建议 → 月度看板 → 落地清单。
+        导出按顺序分两段：<strong>① 经营分析报告</strong>（DeepSeek 先分析前世今生，再导出 Word/PDF——同一份内容两种格式，
+        艺康体小白版结构：先说结论 → 最以前/中间/现在 → 关键指标白话 → 将来建议 → 月度看板 → 落地清单，折线图保留）；
+        分割线以下为 <strong>② 测算模型与费用预算三表</strong>（先 DeepSeek 费用编制建议，导出自动填入）。
+        两段的分析文案均需 DeepSeek 生成后填入；数字全部由引擎确定性计算。
       </p>
       {!session.session ? (
         <p className="panel__note">尚未导入财报。请先完成导入、诊断与互动，再导出。</p>
@@ -2230,9 +2312,132 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
           ) : null}
           {error ? <div className="status status--error" role="alert">{error}</div> : null}
 
-          {/* ① 费用编制建议 — 必须在导出预算三表之前 */}
+          {/* ① 经营分析报告 — DeepSeek 分析前世今生后，Word/PDF（同一份内容）自动填入 */}
+          <div className="advice-panel" id="report-analysis">
+            <h3 className="advice-panel__title">① 经营分析报告 · 前世今生（先做这一步）</h3>
+            <p className="panel__note">
+              <strong>分工：</strong>跨年表/指标/折线图等数字由引擎确定性生成，导出时原样保留；
+              DeepSeek 只把事实清单改写成老板看得懂的「前世今生」文案（一句话结论 → 先说结论 →
+              最以前/中间/现在 → 现在要点 → 将来建议），<strong>禁止编造数字</strong>；
+              文案中出现事实清单外的数字时下方仅提示、不改数。Word 与 PDF 是同一份内容。
+            </p>
+            <div className="ai-actions">
+              <button
+                type="button"
+                className="btn btn--ai"
+                disabled={analysisBusy || busyKind !== null || !session.session}
+                onClick={() => void loadAnalysis()}
+              >
+                {analysisBusy
+                  ? "DeepSeek 撰写中…"
+                  : analysis
+                    ? "重新生成经营分析报告"
+                    : "生成经营分析报告"}
+              </button>
+            </div>
+            {analysisNote ? <p className="panel__note">{analysisNote}</p> : null}
+            {analysis ? (
+              <>
+                {analysis.one_liner ? (
+                  <div className="status status--info" role="status">
+                    一句话结论：{analysis.one_liner}
+                  </div>
+                ) : null}
+                {analysis.number_warnings?.length ? (
+                  <div className="status status--warn" role="alert">
+                    数字核对提示：{analysis.number_warnings.join("；")}
+                  </div>
+                ) : null}
+                <details className="advice-notes">
+                  <summary>查看分析文案（将填入 Word/PDF）</summary>
+                  {analysis.headline ? (
+                    <p>
+                      <strong>先说结论：</strong>
+                      {analysis.headline}
+                    </p>
+                  ) : null}
+                  {analysis.stages.map((st) => (
+                    <div key={st.title}>
+                      <strong>{st.title}</strong>
+                      <p>{st.summary}</p>
+                      {st.bullets.length ? (
+                        <ul>
+                          {st.bullets.map((b, i) => (
+                            <li key={i}>{b}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  ))}
+                  {analysis.now_points.length ? (
+                    <div>
+                      {analysis.now_points.map((pt) => (
+                        <p key={pt.title}>
+                          <strong>{pt.title}：</strong>
+                          {pt.body}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
+                  {analysis.future_actions.length ? (
+                    <div>
+                      <strong>将来建议：</strong>
+                      <ul>
+                        {analysis.future_actions.map((a, i) => (
+                          <li key={i}>{a}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </details>
+                <div className="export-grid">
+                  {ANALYSIS_EXPORT_ITEMS.map((item) => {
+                    const kind = kindOf(item.id);
+                    const busy = kind !== null && busyKind === kind;
+                    const enabled = kind === "word" || kind === "pdf" ? unlocked && analysisReady : unlocked;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={enabled ? "export-card export-card--enabled" : "export-card"}
+                        disabled={busy || !kind || !enabled || analysisBusy}
+                        onClick={() => kind && onExport(kind)}
+                      >
+                        <span className="export-card__format">{item.format}</span>
+                        <strong>
+                          {busy ? "生成中…" : item.name}
+                        </strong>
+                        <span>
+                          {kind === "word"
+                            ? analysisReady
+                              ? "分析文案已填入（艺康体小白版，折线图保留）"
+                              : "请先生成①经营分析报告"
+                            : kind === "pdf"
+                              ? analysisReady
+                                ? "与 Word 同一份内容的 PDF 交付稿"
+                                : "请先生成①经营分析报告"
+                              : item.note ?? ""}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <p className="panel__note">
+                请先点「生成经营分析报告」。DeepSeek 完成前世今生文案后，Word/PDF 导出会自动填入。
+              </p>
+            )}
+          </div>
+
+          {/* 分割线：以上=经营分析报告（Word/PDF）；以下=测算模型与费用预算三表 */}
+          <div className="export-divider" role="separator" aria-label="导出分组分割线">
+            <span>以上 ① 经营分析报告（Word/PDF） ｜ 以下 ② 测算模型与费用预算三表</span>
+          </div>
+
+          {/* ② 费用编制建议 — 必须在导出预算三表之前 */}
           <div className="advice-panel" id="budget-advice">
-            <h3 className="advice-panel__title">① 费用编制建议 · DeepSeek 全量（先做这一步）</h3>
+            <h3 className="advice-panel__title">② 费用编制建议 · DeepSeek 全量（测算与三表的前置）</h3>
             <p className="panel__note">
               <strong>分工：</strong>DeepSeek 在本页完成「开支预算 / 未来预期 / 参考与预算金额」分析填入
               （无上年不编造上年）；导出时<strong>不再二次调用 DeepSeek</strong>。
@@ -2266,7 +2471,7 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
                   >
                     {busyKind === "budget"
                       ? "导出填入中…"
-                      : `② 导出费用预算三表（自动填入 ${selectedCount} 项）`}
+                      : `导出费用预算三表（自动填入 ${selectedCount} 项）`}
                   </button>
                 </>
               ) : null}
@@ -2350,9 +2555,9 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
             )}
           </div>
 
-          {/* ② 其他交付物 + 预算三表卡片 */}
+          {/* ② 测算模型 + 预算三表卡片 */}
           <h3 className="panel__title" style={{ marginTop: 20, fontSize: 15 }}>
-            ② 导出交付物
+            ② 导出测算模型与费用预算三表
           </h3>
           <p className="panel__note">
             费用预算三表：须先完成上方编制建议；导出只写入金额并套用公式模型（占比/毛利表内算）。
@@ -2361,7 +2566,7 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
               : " 当前尚未勾选建议项。"}
           </p>
           <div className="export-grid">
-            {EXPORT_ITEMS.map((item) => {
+            {BUDGET_EXPORT_ITEMS.map((item) => {
               const kind = kindOf(item.id);
               const busy = kind !== null && busyKind === kind;
               const enabled =
@@ -2383,17 +2588,13 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
                       : item.name}
                   </strong>
                   <span>
-                    {kind === "word"
-                      ? "经营业绩分析与建议（小白版）"
-                      : kind === "pdf"
-                        ? "同结构 PDF 交付稿"
-                        : kind === "excel"
-                          ? "成本优化测算模型（可逐月跟踪）"
-                          : kind === "budget"
-                            ? budgetReady
-                              ? `自动填入已勾选 ${selectedCount} 条 DeepSeek 建议`
-                              : "请先完成①费用编制建议并勾选"
-                            : item.note ?? ""}
+                    {kind === "excel"
+                      ? "成本优化测算模型（可逐月跟踪）"
+                      : kind === "budget"
+                        ? budgetReady
+                          ? `自动填入已勾选 ${selectedCount} 条 DeepSeek 建议`
+                          : "请先完成②费用编制建议并勾选"
+                        : item.note ?? ""}
                   </span>
                 </button>
               );

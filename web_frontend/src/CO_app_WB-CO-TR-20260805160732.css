@@ -554,6 +554,35 @@ button {
   color: var(--ink-dim);
 }
 
+/* ── 导出分组分割线：上=经营预算分析(Word/PDF)，下=测算模型与费用预算三表 ── */
+
+.export-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 22px 0 4px;
+  color: var(--ink-dim);
+  font-size: 12px;
+}
+
+.export-divider::before,
+.export-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    rgba(215, 255, 62, 0.35),
+    transparent
+  );
+}
+
+.export-divider span {
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+}
+
 /* ── 费用编制建议（预算三表导出后） ── */
 
 .advice-panel {

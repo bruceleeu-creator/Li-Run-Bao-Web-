@@ -1,6 +1,6 @@
 # 利润宝 · 项目记忆（AGENTS.md）
 
-> 更新：2026-08-18 v24 | 数字质检引擎（core/numeric_audit 双层防护）+ 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源）
+> 更新：2026-08-18 v25 | 经营预算分析链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」（onSummarize 在 selectedFiles 为空〔如「已保存预览」〕时静默跳过自动导入 → 改为明确警告 + 按钮文案如实 + 选新文件重置状态）；v24 数字质检引擎（core/numeric_audit 双层防护）+ 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源）
 
 ---
 
@@ -152,6 +152,14 @@
 - **核心接口**：`PDFPageRecord(page_no,total_pages,method,text,status)`、`extract_all_pages(path,on_progress)`、`chunk_pages(pages,max_chars)`、`AIChatResult(content,finish_reason,...)`、`AIEngine.chat_result(user_prompt,system_prompt,max_tokens,extra)`（保留 `chat()` 兼容）
 - **扫描财报识别（配套修复）**：直接识别 12 核心字段（营收/成本/税金及附加/四费用/利润总额/所得税/净利润/资产总额/负债总额），派生指标由确定性模块计算；年度证据优先级：报表标题完整日期 > 审计报告正文年度 > 文件名四位年份 > 用户输入；相对表头映射：本年/本期/年末/期末→报告年度，上年/上期/年初/期初→报告年度−1；候选值带来源页码/置信度/状态（trusted/review/conflict/manual）；跨年勾稽校验（2023 上年 vs 2022 本年等）；**缺失值必须 null 不得填零**；AI 只接收已确认结构化 JSON，未确认返回 HTTP 400；数值容差 `abs(a-b) <= max(1.0, max(|a|,|b|)*1e-6)`
 
+### 经营分析报告链路（core/CO_report_analysis_WB-CO-TR-20260818.py，2026-08-18 新增；UI 名称「经营分析报告」，旧称经营预算分析）
+- **导出页新顺序（有分割线）**：`① 经营分析报告 · 前世今生`（DeepSeek 先分析 → 导出 **Word/PDF**，同一份内容两种格式）→ **export-divider 分割线** → `② 费用编制建议 → 测算模型 / 费用预算三表`（Excel）。两段的文案均需 DeepSeek 生成后才能导出填入；前端 Word/PDF 卡在 `analysisReady` 前禁用，预算三表卡在勾选建议前禁用
+- **分工（准确性优先）**：数字与结构全部来自确定性引擎——跨年表/指标表/折线图/附录在 `core/report.py` 原模板原样生成（`export_word/export_pdf` 新增可选 `narrative` 参数注入已合并叙事）；DeepSeek 只把 `build_analysis_factsheet` 事实清单改写成小白版文案（one_liner/headline/最以前-中间-现在 stages/now_points 正文/now_judgments 管理判断/future_actions）
+- **三道防线**：① 提示词硬规则「只能引用事实清单数字、stages 数量与标题/要点标题/指标名必须一致」；② **数字白名单校验** `validate_analysis_numbers`——文案中出现事实清单外数字（含元/万元/亿元换算与舍入容差、年份、0-100 计数豁免）→ `number_warnings` 只提示**绝不静默改数**（与 numeric_audit 同原则）；③ `merge_narrative` 按 `_stage_key`（最以前/中间/现在）与要点标题逐项覆盖，缺项/超长/条数不匹配保留规则引擎原文案（宁缺毋滥）
+- **API**：`POST /api/export/analysis`（生成并存内存 `_last_analysis`，按 session_version 匹配；未配置 AI → 503 不静默降级）、`GET /api/export/analysis/last`（同会话恢复，无则 404）；`GET /api/export/status` 新增 `analysis_ready`；Word/PDF 导出端点自动合并最近分析（版本不匹配或缺内容 → 回退规则叙事）
+- **AI 整理并导入的静默跳过坑（2026-08-18 修复）**：`onSummarize` 原来只在 `selectedFiles.length > 0` 时自动 `runImport`，「查看已保存预览」恢复的 previews 没有原始 File 对象 → 整理成功但**不发 POST /api/import、无提示、无导入记录**（用户以为导入失败）。修复契约：无文件时必须给出明确警告（`aiSkipImportWarn`）+ 按钮文案改为「AI 整理（预览无文件，不会自动导入）」+ 查看已保存预览时显示仅供查看提示条 + onFolderPick/onDrop/runImport 重置警告与 showSavedPreview。「已保存预览」永远不可导入（File 对象已不存在），正确路径=重新选文件（拖入即自动导入）
+- **测试**：`tests/CO_test_report_analysis_WB-CO-TR-20260818.py` 6 例（事实清单结构、合并只改文本不动数字、数字白名单告警、normalize/has_content、无 AI 503、合并叙事注入 Word 模板保留）
+
 ## Web 化与运维要点
 - **架构**：React+Vite 前端 → FastAPI 后端（`create_app()`，仅监听 `127.0.0.1:8765`，`GET /api/health` 返回 `{"status":"ok","bind":"127.0.0.1"}`）→ 复用 `core/` + SQLite（`app.db`）+ 本地工作区导出
 - **七工作区 → 五工作区（2026-08-18）**：`overview(导入财报，含导入+AI报告+历史卡片) | diagnosis | interaction | export | settings`（防导航与 API 路由漂移）；`Workspace` 类型已收窄（import/budget 已移除）；导入提交按钮名为「开始导入」（避免与导航「导入财报」严格模式冲突）；视觉深色颗粒风格
@@ -204,6 +212,7 @@
 | 通用财报管线 | `core/pipeline.py` + `case_manifest.py` + `reconciliation.py` | ✅ Phase A+B+C+D：run_case_pipeline 门面 + 案例包 + PolicySnapshot 单点 |
 | 扫描件/AI 解析 | `CO_deepseek_parse` + `CO_full_pdf_reader` + `CO_financial_scan` | ✅ 整份解析 + 逐页读取 + 坐标化识别 |
 | 预算建议/导出叙事 | `CO_budget_advice` + `CO_budget_export` + `narrative.py` | ✅ 三表导出 + Word 叙事 |
+| 经营预算分析（前世今生） | `CO_report_analysis` + `CO_export./analysis` + `CO_ai.analyze_operating_narrative` | ✅ DeepSeek 文案层 + 数字白名单 + Word/PDF 同源注入（2026-08-18） |
 | Web 后端 | `web_backend/` 15 模块 | ✅ 导入/会话/诊断/互动/预算/导出/AI 报告任务全接通，SQLite 持久化 + 导入历史（2026-08-18） |
 | Web 前端 | `web_frontend/` React+Vite | ✅ 五工作区真实 API + 流程导航；导入财报合并页（两栏：主列+右侧记录栏）+ 历史卡片快速载入 |
 | 数字质检引擎 | `core/numeric_audit.py` | ✅ 双层防护：OCR 字面 + 恒等式/错位归因/跳变/合理性 + 评分；高风险强制人工核验（2026-08-18） |
