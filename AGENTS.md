@@ -172,6 +172,77 @@
 - **推送策略与 Mimosa Git 门（2026-08-19 定案，owner 授权）**：ZCode 内 Mimosa 插件会在 `git commit/push` 前跑 L3 深扫并对 high 强制拦截（`--no-verify` 无效，钩子在命令执行前拦截；Bash 直接写项目源文件同样会被「写源旁路」门拦下，改文件须走 Edit/Write 工具）。2026-08-19 对 8 项 high 的分诊结论（全部为既有代码、已在远端）：`CO_import:89` 已做 `rsplit("/",1)[-1]` 文件名净化（该代码本身即防穿越缓解）；`CO_ai:115` 写入服务端 env 指定的配置路径非用户输入；tests 两处「硬编码凭据」为显式假密钥夹具（夹具名自带 not-real 标记、非真实密钥 / 指向 127.0.0.1:39999 死端口测失败路径；指令文件不引用凭据样字面量，原件只在测试代码内）；`test_parser:172`/`make_sample:74` 为 pytest tmp_path 与固定样例路径；`ai_engine:155` 与 `CO_deepseek_parse:116` 的「SSRF」为本机用户自配 AI 端点的设计内行为（PRD F9 可选增强、服务仅绑 127.0.0.1、无外部可控输入；若拒绝环回/私网反而破坏本地网关用法与 test_interactive 失败路径测试）。**后续推送三选一**：① 修复/消除对应 finding 后按钩子要求重扫再推；② 启动 ZCode 前设 `MIMOSA_GIT_GATE_MODE=warn`（high 只提示不拦）或 `MIMOSA_NO_GIT_GATE=1`（关 Git 门）；③ 在终端直接 `git commit && git push`（终端不经 ZCode 钩子，仍会过 `.hooks/pre-commit` 项目守护）。v26 视觉重设计提交系经 owner 明示授权，用 `gh api`（REST：trees→commits→update ref）直推 + 本地 `git fetch && git reset origin/main` 对齐完成，未改动钩子/插件/扫描状态
 - **git 代理坑**：本机 git 配了 `http.proxy=127.0.0.1:7890`（Clash 类），代理未运行时 push 报 `Failed to connect to 127.0.0.1 port 7890`——绕过：`git -c http.proxy= -c https.proxy= push origin main`；或先启动代理再常规 push
 
+## GitHub 推送教程（2026-08-19，按场景选路径）
+
+> 前置：`gh auth status` 已登录 bruceleeu-creator；`git remote -v` 的 origin 指向
+> `https://github.com/bruceleeu-creator/Li-Run-Bao-Web-.git`；`.ai_config.json`、
+> 根目录与 workspaces 的 app.db、用户上传文件均已由 .gitignore 挡在库外，
+> 推送前用 `git status` 复核暂存清单里没有这三类文件。
+
+### 路径 A · 终端常规推送（默认首选）
+
+```bash
+cd <项目根>
+# 1) 清缓存，避免把 __pycache__/.pytest_cache 带进暂存
+find . -type d \( -name __pycache__ -o -name .pytest_cache \) -exec rm -rf {} +
+rm -rf web_frontend/node_modules/.vite
+# 2) 项目守护（0 错误才继续；警告不阻塞）
+.venv/bin/python .hooks/project_guardian.py --quick
+# 3) 暂存并核对清单 → 提交 → 推送
+git add -A && git status --short
+git commit -m "feat: <一句话说明>"
+git push origin main
+#    代理未运行时报 7890 连接失败时改用：
+git -c http.proxy= -c https.proxy= push origin main
+```
+
+### 路径 B · ZCode 内被 Mimosa Git 门拦截时
+
+钩子在命令执行前拦截（`--no-verify` 无效），先做分诊再选一：
+1. **修复/消除 finding** 后按钩子提示重扫再推（见上文分诊记录与三选一）；
+2. **降级门禁**（改环境变量后需重启 ZCode 生效）：启动前 `export MIMOSA_GIT_GATE_MODE=warn`（high 只提示）或 `export MIMOSA_NO_GIT_GATE=1`（关 Git 门）；
+3. 直接换路径 A（终端不经 ZCode 钩子，仍会过 `.hooks/pre-commit` 项目守护）。
+
+### 路径 C · gh api REST 兜底（仅限 owner 明示授权；不改钩子/插件/扫描状态）
+
+适用于 ZCode 内既被 Git 门拦截、又拿到 owner「直接推送」授权的场景。
+**仅支持文本文件**（二进制需改用 base64 encoding 字段）。v26 两个提交
+（`be7ae4e`/`c4ad31c`）即用此通道完成：
+
+```bash
+cd <项目根>
+# 1) 用 HEAD 的 tree 作 base，把改动文件内容打包成 payload（写到 /tmp，不触碰工作区）
+python3 - <<'PYEOF'
+import json, subprocess
+files = ["<改动文件1>", "<改动文件2>"]          # 相对路径，utf-8 文本
+head = subprocess.run(["git","rev-parse","HEAD"],capture_output=True,text=True).stdout.strip()
+tree = subprocess.run(["git","rev-parse","HEAD^{tree}"],capture_output=True,text=True).stdout.strip()
+entries=[{"path":f,"mode":"100644","type":"blob",
+          "content":open(f,encoding="utf-8").read(),"encoding":"utf-8"} for f in files]
+json.dump({"base_tree":tree,"tree":entries},
+          open("/tmp/lrb_push_tree.json","w",encoding="utf-8"),ensure_ascii=False)
+print("parent:", head)
+PYEOF
+# 2) 远端建 tree → 建 commit（parents 填上一步打印的 parent sha）→ 推进 main
+TREE=$(gh api repos/bruceleeu-creator/Li-Run-Bao-Web-/git/trees \
+       --input /tmp/lrb_push_tree.json --jq .sha)
+COMMIT=$(gh api repos/bruceleeu-creator/Li-Run-Bao-Web-/git/commits \
+       -f message="<提交信息>" -f tree="$TREE" \
+       -f 'parents[]=<HEAD的sha>' --jq .sha)
+gh api -X PATCH repos/bruceleeu-creator/Li-Run-Bao-Web-/git/refs/heads/main -f sha="$COMMIT"
+# 3) 本地对齐（fetch + mixed reset；工作区内容与提交一致，status 应转干净）
+git -c http.proxy= -c https.proxy= fetch origin && git reset origin/main
+# 4) 验证：两行 sha 必须一致，且 status 干净
+git rev-parse HEAD
+gh api repos/bruceleeu-creator/Li-Run-Bao-Web-/git/refs/heads/main --jq .object.sha
+git status --short
+```
+
+注意事项：兜底通道每次使用须有 owner 当次明示授权并在提交信息里注明；
+`git reset origin/main` 是 mixed reset，只动 HEAD 与暂存区、不动工作区文件；
+ZCode 内改项目源文件请走 Edit/Write 工具（Bash 直接写会被「写源旁路」门拦）。
+
+
 ## 验收记录（T8 最终独立验收，2026-07-26）
 - **结论：通过（CO Gate 8 签字），允许作为 v1.0 本地可用版本交付**
 - 质量门禁：129 通过/2 跳过（仅缺可选 PDF 提取器）；Guardian 0 错 0 警；check.sh 5 项全过；样例生成/无头端到端通过
