@@ -1,0 +1,11 @@
+[
+  {
+    "date": "2026-08-19",
+    "scope": "app",
+    "macrostructure": "Workbench (app)",
+    "theme": "custom 纸墨台账 Ledger Paper",
+    "theme_axes": "light-paper / roman-serif / cool-ink",
+    "enrichment": "none",
+    "brief": "利润宝 Web 前端去 AI 味重设计：保留架构/类名/文案契约，深色荧光主题改纸墨台账（design.md 已锁定于 web_frontend/design.md）"
+  }
+]

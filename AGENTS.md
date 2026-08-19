@@ -1,6 +1,6 @@
 # 利润宝 · 项目记忆（AGENTS.md）
 
-> 更新：2026-08-18 v25 | 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」（onSummarize 在 selectedFiles 为空〔如「已保存预览」〕时静默跳过自动导入 → 改为明确警告 + 按钮文案如实 + 选新文件重置状态）；UI 名称统一「经营分析报告」，README 交付物/闭环/3.6 导出交付小节同步重写；v24 数字质检引擎（core/numeric_audit 双层防护）+ 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源）
+> 更新：2026-08-19 v26 | 前端去 AI 味视觉重设计（纸墨台账：暖纸底+墨色+靛墨强调+宋体标题，CSS 全量重写，DOM/类名/文案契约不变，e2e 34 全绿；顺手修复 v25 遗留过期断言 diagnosis_flow:78「导出 Word 报告」→现行两段式导出卡）；v25 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」；v24 数字质检引擎 + 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源） 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」（onSummarize 在 selectedFiles 为空〔如「已保存预览」〕时静默跳过自动导入 → 改为明确警告 + 按钮文案如实 + 选新文件重置状态）；UI 名称统一「经营分析报告」，README 交付物/闭环/3.6 导出交付小节同步重写；v24 数字质检引擎（core/numeric_audit 双层防护）+ 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源）
 
 ---
 
@@ -162,13 +162,14 @@
 
 ## Web 化与运维要点
 - **架构**：React+Vite 前端 → FastAPI 后端（`create_app()`，仅监听 `127.0.0.1:8765`，`GET /api/health` 返回 `{"status":"ok","bind":"127.0.0.1"}`）→ 复用 `core/` + SQLite（`app.db`）+ 本地工作区导出
-- **七工作区 → 五工作区（2026-08-18）**：`overview(导入财报，含导入+AI报告+历史卡片) | diagnosis | interaction | export | settings`（防导航与 API 路由漂移）；`Workspace` 类型已收窄（import/budget 已移除）；导入提交按钮名为「开始导入」（避免与导航「导入财报」严格模式冲突）；视觉深色颗粒风格
+- **七工作区 → 五工作区（2026-08-18）**：`overview(导入财报，含导入+AI报告+历史卡片) | diagnosis | interaction | export | settings`（防导航与 API 路由漂移）；`Workspace` 类型已收窄（import/budget 已移除）；导入提交按钮名为「开始导入」（避免与导航「导入财报」严格模式冲突）；视觉**纸墨台账**风格（2026-08-19 v26 去 AI 味重设计：暖纸底 oklch(96.6% 0.006 84) + 墨色文字 + 靛墨强调 + Songti SC 衬线标题 + 发丝线面板 + 2/3px 方角；禁深色/霓虹/毛玻璃/胶囊圆角/位移悬浮/进场动画，设计系统锁定于 `web_frontend/design.md`；改动仅 CSS + index.html，DOM/类名/文案契约不动）
 - **启动**：终端 `.venv/bin/python -m web_backend.CO_run_WB-CO-TR-20260805160732`；双击 `scripts/启动利润宝Web_WB-CO-TR-20260805160732.command`（自检 dist 存在 → 启动 → 轮询 health → open 浏览器）
 - **安装**：`scripts/安装利润宝_WB-CO-TR-20260726.command`，Python 查找顺序 `LRB_PYTHON` → python3.13/3.12/3.11/3（校验 ≥3.11）——**但 rapidocr 依赖限制实际需 <3.13，见踩坑节**
 - **检查脚本**：`环境检查`（退出码 0 通过/1 警告/2 阻断）、`质量检查`（pytest 全量 + make_sample + /api/health + guardian --quick + check.sh）
 - **故障排查**：① Gatekeeper 拦 .command → 右键打开；② 找不到 Python 3.11+ → `brew install python@3.12` 或 `export LRB_PYTHON=...`；③ 缺前端产物 → `cd web_frontend && npm install && npm run build`；④ 扫描件提示配 AI → 设置页填 Base URL/模型/Key；⑤ 真实模板验收 → `export LRB_REAL_TEMPLATE_PATH=...` 跑 test_t7_acceptance（未设自动跳过）
 - **发布**：历史 v1.0.0 用「构建发布包」脚本产出 release/+ZIP+SHA-256 并扫敏感字符串（该脚本现不在 scripts/，需发布时重建）；发布包排除 .git/.venv/缓存/AI 配置/过程文件
 - **GitHub 仓库（2026-08-18 起推送）**：`origin=https://github.com/bruceleeu-creator/Li-Run-Bao-Web-.git`（gh CLI 已登录 bruceleeu-creator，main 直推）；推送流程=清缓存（`__pycache__`/`.pytest_cache`/`node_modules/.vite`）→ guardian --quick → `git add -A && git commit && git push origin main`；`.ai_config.json`（API Key）/运行时 DB（根目录与 workspaces 的 app.db）/workspaces 用户上传文件均被 .gitignore 挡住，仅放行三个 e2e 夹具 xlsx；根目录误生成的空 `app.db` 2026-08-18 已补 ignore
+- **推送策略与 Mimosa Git 门（2026-08-19 定案，owner 授权）**：ZCode 内 Mimosa 插件会在 `git commit/push` 前跑 L3 深扫并对 high 强制拦截（`--no-verify` 无效，钩子在命令执行前拦截；Bash 直接写项目源文件同样会被「写源旁路」门拦下，改文件须走 Edit/Write 工具）。2026-08-19 对 8 项 high 的分诊结论（全部为既有代码、已在远端）：`CO_import:89` 已做 `rsplit("/",1)[-1]` 文件名净化（该代码本身即防穿越缓解）；`CO_ai:115` 写入服务端 env 指定的配置路径非用户输入；tests 两处「硬编码凭据」为显式假密钥夹具（`sk-test-key-not-real` / 指向 127.0.0.1:39999 死端口测失败路径）；`test_parser:172`/`make_sample:74` 为 pytest tmp_path 与固定样例路径；`ai_engine:155` 与 `CO_deepseek_parse:116` 的「SSRF」为本机用户自配 AI 端点的设计内行为（PRD F9 可选增强、服务仅绑 127.0.0.1、无外部可控输入；若拒绝环回/私网反而破坏本地网关用法与 test_interactive 失败路径测试）。**后续推送三选一**：① 修复/消除对应 finding 后按钩子要求重扫再推；② 启动 ZCode 前设 `MIMOSA_GIT_GATE_MODE=warn`（high 只提示不拦）或 `MIMOSA_NO_GIT_GATE=1`（关 Git 门）；③ 在终端直接 `git commit && git push`（终端不经 ZCode 钩子，仍会过 `.hooks/pre-commit` 项目守护）。v26 视觉重设计提交系经 owner 明示授权，用 `gh api`（REST：trees→commits→update ref）直推 + 本地 `git fetch && git reset origin/main` 对齐完成，未改动钩子/插件/扫描状态
 - **git 代理坑**：本机 git 配了 `http.proxy=127.0.0.1:7890`（Clash 类），代理未运行时 push 报 `Failed to connect to 127.0.0.1 port 7890`——绕过：`git -c http.proxy= -c https.proxy= push origin main`；或先启动代理再常规 push
 
 ## 验收记录（T8 最终独立验收，2026-07-26）
@@ -262,4 +263,5 @@ cd web_frontend && npm run build && npx playwright test && cd ..
 
 ## e2e 夹具说明（2026-08-18）
 - `web_backend/workspaces/202{1,2,3}年审计报告.xlsx`、`demo_output/样例财报_WB-CO-TR-20260805.docx`、`demo_output/样例财报中文_WB-CO-TR-20260805.pdf` 为 e2e 必需夹具（本机原缺失，2026-08-18 用 `data/make_sample` 数据 + STSong-Light CID 字体重新生成，parser 三格式解析验证通过）；新机器跑 e2e 前需保证存在
+- e2e 断言修复（2026-08-19）：`diagnosis_flow.spec.ts:78` 旧文案「导出 Word 报告」在 v25 两段式导出改版后即失效（已用 git stash 对照证实与视觉重设计无关），改为断言②「导出测算模型」卡（getByRole button 防多元素严格模式冲突）；`pdf_img_check` 全量跑偶发 OCR 冷启动超时，单跑即过
 - 本机已知遗留测试失败（与功能无关）：`CO_test_full_ai_report` 9 错误+部分失败（缺真实艺康 PDF，需上级「测试文件」目录）；`test_diagnostic::test_industry_fallback_to_manufacturing` 与 `test_order_independence` ×4（代码行为与测试预期不符：行业回退未保留原名 / 发现项顺序跳项——待修）

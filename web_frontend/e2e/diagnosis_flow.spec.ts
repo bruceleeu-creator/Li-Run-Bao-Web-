@@ -74,8 +74,10 @@ test("完整流程：导入 → 诊断 → 互动 → 导出解锁", async ({ pa
   await expect(page.getByText("导出已解锁", { exact: false })).toBeVisible({ timeout: 15000 });
 
   // 下一步：进入导出页，导出按钮可点
+  // 2026-08-19：导出页两段式重构后 Word/PDF 卡片需先生成①经营分析报告才渲染，
+  // 这里断言无条件渲染的②测算模型卡（解锁后即 enabled）
   await page.getByRole("button", { name: "下一步 →" }).click();
-  await expect(page.getByText("导出 Word 报告", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "导出测算模型" })).toBeVisible();
   await expect(page.locator(".export-card--enabled").first()).toBeVisible();
 });
 
