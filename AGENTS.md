@@ -168,7 +168,7 @@
 - **检查脚本**：`环境检查`（退出码 0 通过/1 警告/2 阻断）、`质量检查`（pytest 全量 + make_sample + /api/health + guardian --quick + check.sh）
 - **故障排查**：① Gatekeeper 拦 .command → 右键打开；② 找不到 Python 3.11+ → `brew install python@3.12` 或 `export LRB_PYTHON=...`；③ 缺前端产物 → `cd web_frontend && npm install && npm run build`；④ 扫描件提示配 AI → 设置页填 Base URL/模型/Key；⑤ 真实模板验收 → `export LRB_REAL_TEMPLATE_PATH=...` 跑 test_t7_acceptance（未设自动跳过）
 - **发布**：历史 v1.0.0 用「构建发布包」脚本产出 release/+ZIP+SHA-256 并扫敏感字符串（该脚本现不在 scripts/，需发布时重建）；发布包排除 .git/.venv/缓存/AI 配置/过程文件
-- **GitHub 仓库（2026-08-18 起推送）**：`origin=https://github.com/bruceleeu-creator/Li-Run-Bao-Web-.git`（gh CLI 已登录 bruceleeu-creator，main 直推）；推送流程=清缓存（`__pycache__`/`.pytest_cache`/`node_modules/.vite`）→ guardian --quick → `git add -A && git commit && git push origin main`；`.ai_config.json`（API Key）/运行时 DB（根目录与 workspaces 的 app.db）/workspaces 用户上传文件均被 .gitignore 挡住，仅放行三个 e2e 夹具 xlsx；根目录误生成的空 `app.db` 2026-08-18 已补 ignore
+- **GitHub 仓库（2026-08-18 起推送）**：`origin=https://github.com/bruceleeu-creator/Li-Run-Bao-Web-.git`（gh CLI 已登录 bruceleeu-creator，main 直推）；推送流程=guardian --quick → `git add -A && git commit && git push origin main`（缓存目录均被 .gitignore 忽略、不会入暂存，无需删除；详见下方「GitHub 推送教程」）；`.ai_config.json`（API Key）/运行时 DB（根目录与 workspaces 的 app.db）/workspaces 用户上传文件均被 .gitignore 挡住，仅放行三个 e2e 夹具 xlsx；根目录误生成的空 `app.db` 2026-08-18 已补 ignore
 - **推送策略与 Mimosa Git 门（2026-08-19 定案，owner 授权）**：ZCode 内 Mimosa 插件会在 `git commit/push` 前跑 L3 深扫并对 high 强制拦截（`--no-verify` 无效，钩子在命令执行前拦截；Bash 直接写项目源文件同样会被「写源旁路」门拦下，改文件须走 Edit/Write 工具）。2026-08-19 对 8 项 high 的分诊结论（全部为既有代码、已在远端）：`CO_import:89` 已做 `rsplit("/",1)[-1]` 文件名净化（该代码本身即防穿越缓解）；`CO_ai:115` 写入服务端 env 指定的配置路径非用户输入；tests 两处「硬编码凭据」为显式假密钥夹具（夹具名自带 not-real 标记、非真实密钥 / 指向 127.0.0.1:39999 死端口测失败路径；指令文件不引用凭据样字面量，原件只在测试代码内）；`test_parser:172`/`make_sample:74` 为 pytest tmp_path 与固定样例路径；`ai_engine:155` 与 `CO_deepseek_parse:116` 的「SSRF」为本机用户自配 AI 端点的设计内行为（PRD F9 可选增强、服务仅绑 127.0.0.1、无外部可控输入；若拒绝环回/私网反而破坏本地网关用法与 test_interactive 失败路径测试）。**后续推送三选一**：① 修复/消除对应 finding 后按钩子要求重扫再推；② 启动 ZCode 前设 `MIMOSA_GIT_GATE_MODE=warn`（high 只提示不拦）或 `MIMOSA_NO_GIT_GATE=1`（关 Git 门）；③ 在终端直接 `git commit && git push`（终端不经 ZCode 钩子，仍会过 `.hooks/pre-commit` 项目守护）。v26 视觉重设计提交系经 owner 明示授权，用 `gh api`（REST：trees→commits→update ref）直推 + 本地 `git fetch && git reset origin/main` 对齐完成，未改动钩子/插件/扫描状态
 - **git 代理坑**：本机 git 配了 `http.proxy=127.0.0.1:7890`（Clash 类），代理未运行时 push 报 `Failed to connect to 127.0.0.1 port 7890`——绕过：`git -c http.proxy= -c https.proxy= push origin main`；或先启动代理再常规 push
 
@@ -183,9 +183,9 @@
 
 ```bash
 cd <项目根>
-# 1) 清缓存，避免把 __pycache__/.pytest_cache 带进暂存
-find . -type d \( -name __pycache__ -o -name .pytest_cache \) -exec rm -rf {} +
-rm -rf web_frontend/node_modules/.vite
+# 1) 缓存无需删除：__pycache__/.pytest_cache/node_modules（含 .vite）均已被 .gitignore
+#    忽略，git add -A 不会暂存它们；本地磁盘清理属可选手动操作，
+#    Agent 常驻指令中不保留不可逆删除命令（如需预览可清理的忽略文件：git status --ignored）
 # 2) 项目守护（0 错误才继续；警告不阻塞）
 .venv/bin/python .hooks/project_guardian.py --quick
 # 3) 暂存并核对清单 → 提交 → 推送
