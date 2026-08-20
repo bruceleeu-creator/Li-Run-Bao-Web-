@@ -10,7 +10,9 @@ RUN pip install --no-cache-dir -r /app/board_backend/requirements-board.txt
 COPY board_backend /app/board_backend
 COPY board_frontend/dist /app/board_frontend/dist
 
-WORKDIR /app/board_backend
+# board_backend 为带连字符模块名的包：须以 /app 为 sys.path 根（importlib 加载约定）
+WORKDIR /app
+ENV PYTHONPATH=/app
 EXPOSE 8080
 
 CMD ["python", "-c", "import importlib; app = importlib.import_module('board_backend.CO_app_WB-CO-TR-20260820').create_app(); import uvicorn; uvicorn.run(app, host='0.0.0.0', port=8080)"]
