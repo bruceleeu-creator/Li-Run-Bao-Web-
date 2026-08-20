@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import os
 import re
+import threading
 from typing import Dict, List, Optional, Tuple
 
 from .models import (
@@ -580,19 +581,69 @@ def _read_pptx_tables(path: str) -> List[_GridSheet]:
 # 2026-08-09：用户要求完整采集，不再限制 OCR 页数上限（扫描件全量识别）
 _OCR_MAX_PAGES = 10000          # 安全护栏：全量 OCR（不再只识别前 12 页）
 _ocr_engine_holder: list = []  # 惰性单例容器（元素 0 为引擎或 None）
+_ocr_engine_lock = threading.Lock()
+# 高精度模型放置目录：存在 PP-OCRv6 medium/server 的 .onnx 时自动启用（离线可控，
+# 规避 rapidocr 默认从 modelscope 在线拉取在本机网络下不可用的问题）
+_OCR_MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+_OCR_DET_MODEL = "PP-OCRv6_det_medium.onnx"
+_OCR_REC_MODEL = "PP-OCRv6_rec_medium.onnx"
 
 
 def _get_ocr_engine():
-    """惰性加载 RapidOCR 引擎；不可用时返回 None（不阻塞预览）。"""
+    """惰性加载 RapidOCR 引擎；不可用时返回 None（不阻塞预览）。
+
+    优先 rapidocr 3.x 统一包（默认 PP-OCRv6 small，包内自带、离线可用）；
+    models/ 目录下放有更高精度模型文件时自动切换。旧包
+    rapidocr_onnxruntime 1.x 仍可用作兜底。
+    """
     if _ocr_engine_holder:
         return _ocr_engine_holder[0]
-    try:
-        from rapidocr_onnxruntime import RapidOCR
-        engine = RapidOCR()
-    except Exception:
+    with _ocr_engine_lock:
+        if _ocr_engine_holder:
+            return _ocr_engine_holder[0]
         engine = None
-    _ocr_engine_holder.append(engine)
+        try:
+            from rapidocr import RapidOCR
+
+            params = {}
+            det_path = os.path.join(_OCR_MODEL_DIR, _OCR_DET_MODEL)
+            rec_path = os.path.join(_OCR_MODEL_DIR, _OCR_REC_MODEL)
+            if os.path.isfile(det_path) and os.path.isfile(rec_path):
+                params = {"Det.model_path": det_path, "Rec.model_path": rec_path}
+            engine = RapidOCR(params=params) if params else RapidOCR()
+        except Exception:
+            try:
+                from rapidocr_onnxruntime import RapidOCR
+
+                engine = RapidOCR()
+            except Exception:
+                engine = None
+        _ocr_engine_holder.append(engine)
     return engine
+
+
+def normalize_ocr_result(result) -> list:
+    """把不同 RapidOCR 版本的输出归一为 [box, text, confidence] 三元组列表。
+
+    rapidocr 3.x 返回 RapidOCROutput（.boxes/.txts/.scores 属性对象）；
+    rapidocr_onnxruntime 1.x 返回 (list[[box, text, conf]], elapse) 元组。
+    坐标重建（rebuild_ocr_rows）与置信度分级按三元组消费，统一在此收口。
+    """
+    if result is None:
+        return []
+    if isinstance(result, tuple):
+        result = result[0] or []
+    txts = getattr(result, "txts", None)
+    items: List = []
+    if txts is not None:
+        for box, text, score in zip(result.boxes, txts, result.scores):
+            if text is not None and str(text).strip():
+                items.append([box, str(text), float(score)])
+        return items
+    for item in result:
+        if item and len(item) > 2 and item[1] and str(item[1]).strip():
+            items.append([item[0], str(item[1]), float(item[2])])
+    return items
 
 
 def _ocr_pil_text(engine, pil_image) -> str:
@@ -600,11 +651,9 @@ def _ocr_pil_text(engine, pil_image) -> str:
     try:
         import numpy as np
         arr = np.array(pil_image.convert("RGB"))
-        result, _ = engine(arr)
-        if not result:
-            return ""
-        lines = [str(item[1]).strip() for item in result if item and len(item) > 1 and item[1]]
-        return "\n".join(lines)
+        items = normalize_ocr_result(engine(arr))
+        lines = [text.strip() for _, text, _ in items]
+        return "\n".join(line for line in lines if line)
     except Exception:
         return ""
 

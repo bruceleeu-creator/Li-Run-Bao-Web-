@@ -12,7 +12,12 @@ python-docx>=0.8.11
 python-pptx>=0.6.21
 pdfplumber>=0.11
 pypdfium2>=5.0
-rapidocr_onnxruntime>=1.4
+# OCR：rapidocr 3.x 统一包（默认 PP-OCRv6 small，模型内置于包内、离线可用）。
+# 2026-08-16 由 rapidocr_onnxruntime 迁移而来：旧包 >=1.4 不支持 Python 3.13。
+# 更高精度档（PP-OCRv6 medium / PP-OCRv5 server）下载 .onnx 放入项目 models/
+# 目录即自动启用，无需改代码（见 core/parser.py _OCR_MODEL_DIR）。
+rapidocr>=3.9
+onnxruntime>=1.20
 reportlab>=4.0
 requests>=2.28
 #

@@ -1,5 +1,6 @@
 # 利润宝 · 项目记忆（AGENTS.md）
 
+> 更新：2026-08-20 v26.1 | Windows 主机迁移 git 仓库：克隆最新 main 后移植本地未推送改进——OCR rapidocr 3.x（parser.normalize_ocr_result 归一 + 共享引擎 + models/ 高精度模型自动启用 + CO_full_pdf_reader 216DPI 低置信度重扫 + CO_financial_scan y_tolerance 自适应）、Windows 兼容（CO_ai_report_job fcntl→msvcrt 锁抽象、测试子进程平台分支、guardian 路径正斜杠归一）；requirements 由 rapidocr_onnxruntime 迁移 rapidocr>=3.9（支持 Python 3.13）
 > 更新：2026-08-19 v26 | 前端去 AI 味视觉重设计（纸墨台账：暖纸底+墨色+靛墨强调+宋体标题，CSS 全量重写，DOM/类名/文案契约不变，e2e 34 全绿；顺手修复 v25 遗留过期断言 diagnosis_flow:78「导出 Word 报告」→现行两段式导出卡）；v25 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」；v24 数字质检引擎 + 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源） 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」（onSummarize 在 selectedFiles 为空〔如「已保存预览」〕时静默跳过自动导入 → 改为明确警告 + 按钮文案如实 + 选新文件重置状态）；UI 名称统一「经营分析报告」，README 交付物/闭环/3.6 导出交付小节同步重写；v24 数字质检引擎（core/numeric_audit 双层防护）+ 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源）
 
 ---
@@ -258,7 +259,7 @@ ZCode 内改项目源文件请走 Edit/Write 工具（Bash 直接写会被「写
 
 ## 容易踩坑的 Python 环境
 - 系统默认 `python3` 为 3.9.6，改用 3.11+；不要假设 `python3.13` 默认可用
-- **rapidocr_onnxruntime>=1.4 需 Python <3.13**（Requires-Python 上限），3.13 下 pip 装依赖直接失败；本机 2026-08-18 实测用 Python 3.11.15 成功；安装脚本与 README 的「3.13 优先」顺序对全新环境不成立
+- **OCR 包已迁移 rapidocr 3.x（2026-08-20 入库）**：`rapidocr>=3.9` 统一包（默认 PP-OCRv6 small 内置离线，支持 Python 3.13）；`rapidocr_onnxruntime 1.x` 仅作兜底导入（其 Requires-Python <3.13 的限制只影响兜底路径）；高精度档 .onnx 放 `models/`（已 gitignore）自动启用——本机 modelscope/huggingface 不通，在线拉模型会失败，必须手动放文件
 - macOS 默认无 `xvfb-run`，Web 后端测试用 TestClient/Playwright
 - 验收命令统一使用项目 `.venv/bin/python`（正式支持 Python 3.11+）
 

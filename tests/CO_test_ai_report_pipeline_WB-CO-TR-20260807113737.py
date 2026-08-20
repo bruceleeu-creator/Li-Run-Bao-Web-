@@ -1546,10 +1546,18 @@ def test_live_old_process_lock_prevents_recovery_and_source_drain(tmp_path, monk
     job_mod.release_process_lease(force=True)
     lock_path = job_mod.get_process_lock_path()
     child_code = (
-        "import fcntl, pathlib, sys; "
-        "p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True, exist_ok=True); "
-        "f=p.open('a+'); fcntl.flock(f.fileno(), fcntl.LOCK_EX); "
-        "print('ready', flush=True); sys.stdin.read()"
+        "import pathlib, sys\n"
+        "p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "f=p.open('a+')\n"
+        "try:\n"
+        "    import fcntl\n"
+        "    fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
+        "except ImportError:\n"
+        "    import msvcrt\n"
+        "    f.seek(0)\n"
+        "    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
+        "print('ready', flush=True)\n"
+        "sys.stdin.read()"
     )
     child = subprocess.Popen(
         [sys.executable, "-c", child_code, str(lock_path)],
@@ -1581,12 +1589,27 @@ def test_live_old_process_lock_prevents_recovery_and_source_drain(tmp_path, monk
 def _probe_process_lock(lock_path: Path) -> str:
     """Return the result of a separate process's non-blocking lock attempt."""
     code = (
-        "import fcntl, pathlib, sys; "
-        "p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True, exist_ok=True); "
-        "f=p.open('a+'); "
-        "\ntry:\n fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)"
-        "\nexcept BlockingIOError:\n print('blocked')"
-        "\nelse:\n print('acquired')"
+        "import pathlib, sys\n"
+        "p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "f=p.open('a+')\n"
+        "try:\n"
+        "    import fcntl\n"
+        "except ImportError:\n"
+        "    import msvcrt\n"
+        "    f.seek(0)\n"
+        "    try:\n"
+        "        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
+        "    except OSError:\n"
+        "        print('blocked')\n"
+        "    else:\n"
+        "        print('acquired')\n"
+        "else:\n"
+        "    try:\n"
+        "        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "    except BlockingIOError:\n"
+        "        print('blocked')\n"
+        "    else:\n"
+        "        print('acquired')"
     )
     completed = subprocess.run(
         [sys.executable, "-c", code, str(lock_path)],

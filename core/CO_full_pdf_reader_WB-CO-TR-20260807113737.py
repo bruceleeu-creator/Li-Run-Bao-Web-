@@ -29,6 +29,11 @@ _OCR_UNINITIALIZED = object()
 _OCR_UNAVAILABLE = object()
 _ocr_engine: Any = _OCR_UNINITIALIZED
 _ocr_engine_lock = threading.Lock()
+# 正式解析渲染倍率：1.5（约 108 DPI）下财报小字号数字像素信息不足；
+# 3.0（约 216 DPI）兼顾精度与速度，低置信度页再升档重扫。
+_OCR_RENDER_SCALE = 3.0
+_OCR_RESCAN_SCALE = 4.0
+_OCR_RESCAN_CONFIDENCE = 0.85
 
 
 @dataclass(frozen=True)
@@ -91,26 +96,36 @@ def _extract_text_from_document(document: Any, page_index: int) -> str:
 
 
 def _get_ocr_engine() -> Any:
-    """按需构造并在线程间共享 RapidOCR 引擎。"""
+    """委托 core.parser 的共享 OCR 引擎（全项目单例，含降级与模型覆盖逻辑）。"""
     global _ocr_engine
     if _ocr_engine is _OCR_UNINITIALIZED:
         with _ocr_engine_lock:
             if _ocr_engine is _OCR_UNINITIALIZED:
-                from rapidocr_onnxruntime import RapidOCR
+                from core import parser as parser_mod
 
-                _ocr_engine = RapidOCR()
+                _ocr_engine = parser_mod._get_ocr_engine()
     return _ocr_engine
 
 
-def _extract_ocr_from_document(document: Any, page_index: int, engine: Any) -> str:
-    """渲染已打开文档的一页，并复用调用方传入的 OCR 引擎。"""
+def _extract_ocr_from_document(
+    document: Any, page_index: int, engine: Any, scale: float = _OCR_RENDER_SCALE
+) -> tuple[str, float]:
+    """渲染已打开文档的一页并 OCR，返回 (文本, 平均置信度)。
+
+    平均置信度供调用方判断是否需要更高分辨率重扫；识别为空时置信度为 0。
+    """
     import numpy as np
 
-    image = document[page_index].render(scale=1.5).to_pil()
-    result, _ = engine(np.array(image.convert("RGB")))
-    if not result:
-        return ""
-    return "\n".join(item[1] for item in result if item and len(item) > 1 and item[1]).strip()
+    from core import parser as parser_mod
+
+    image = document[page_index].render(scale=scale).to_pil()
+    result = engine(np.array(image.convert("RGB")))
+    items = parser_mod.normalize_ocr_result(result)
+    text = "\n".join(text for _, text, _ in items if text).strip()
+    confidence = (
+        sum(conf for _, _, conf in items) / len(items) if items else 0.0
+    )
+    return text, confidence
 
 
 def extract_all_pages(
@@ -140,15 +155,30 @@ def extract_all_pages(
                             ocr_engine = _OCR_UNAVAILABLE
                     if ocr_engine is _OCR_UNAVAILABLE:
                         ocr_text = ""
+                        ocr_confidence = 0.0
                         ocr_failed = True
                     else:
                         try:
-                            ocr_text = _extract_ocr_from_document(
+                            ocr_text, ocr_confidence = _extract_ocr_from_document(
                                 render_document, page_index, ocr_engine
                             )
                         except Exception:
-                            ocr_text = ""
+                            ocr_text, ocr_confidence = "", 0.0
                             ocr_failed = True
+                    if ocr_text and ocr_confidence < _OCR_RESCAN_CONFIDENCE:
+                        # 财报数字对识别精度敏感：低置信度页用更高分辨率重扫
+                        # 一次，仅在重扫结果确实更好时采用，避免无谓抖动。
+                        try:
+                            retry_text, retry_confidence = _extract_ocr_from_document(
+                                render_document,
+                                page_index,
+                                ocr_engine,
+                                scale=_OCR_RESCAN_SCALE,
+                            )
+                            if retry_text and retry_confidence > ocr_confidence:
+                                ocr_text, ocr_confidence = retry_text, retry_confidence
+                        except Exception:
+                            pass
                     if ocr_text:
                         record = PDFPageRecord(page_index + 1, total_pages, "ocr", ocr_text, "ok")
                     elif text:

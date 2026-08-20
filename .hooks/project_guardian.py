@@ -148,7 +148,8 @@ def find_py_files(root: Path) -> List[Path]:
 
 
 def py_files_relative(root: Path) -> List[str]:
-    return [str(f.relative_to(root)) for f in find_py_files(root)]
+    # Windows 下 relative_to 产出反斜杠，统一为正斜杠以匹配期望清单
+    return [str(f.relative_to(root)).replace("\\", "/") for f in find_py_files(root)]
 
 
 def any_file_uses(keyword: str) -> bool:
@@ -256,7 +257,7 @@ class Checker:
         self.warnings: List[str] = []
         self.info: List[str] = []
         self.py_files = find_py_files(root)
-        self.relative_py_files = [str(f.relative_to(root)) for f in self.py_files]
+        self.relative_py_files = py_files_relative(root)
 
     # ── 检查 1：模块完整性 ──
     def check_module_completeness(self):

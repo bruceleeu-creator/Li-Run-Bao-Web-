@@ -52,8 +52,13 @@ def _box_center_y(box) -> float:
     return sum(float(point[1]) for point in box) / len(box)
 
 
-def rebuild_ocr_rows(items: list, y_tolerance: float = 14.0) -> list[dict]:
-    """按文字框纵坐标聚类为行，再按横坐标排序为列。"""
+def rebuild_ocr_rows(items: list, y_tolerance: float | None = None) -> list[dict]:
+    """按文字框纵坐标聚类为行，再按横坐标排序为列。
+
+    y_tolerance 缺省自适应：取本页文字框高度中位数的 0.8 倍（钳制在
+    8~28px），替代固定 14px——不同扫描件的行高与渲染倍率差异大，固定值
+    容易把相邻两行并成一行导致金额串列。显式传值时仍按传入值执行。
+    """
     normalized = []
     for item in items or []:
         if not item or len(item) < 2 or not str(item[1]).strip():
@@ -68,6 +73,17 @@ def rebuild_ocr_rows(items: list, y_tolerance: float = 14.0) -> list[dict]:
             "y": _box_center_y(box),
         })
     normalized.sort(key=lambda entry: (entry["y"], entry["x"]))
+
+    if y_tolerance is None and normalized:
+        heights = sorted(
+            max(float(point[1]) for point in entry["box"])
+            - min(float(point[1]) for point in entry["box"])
+            for entry in normalized
+        )
+        median_height = heights[len(heights) // 2]
+        y_tolerance = min(28.0, max(8.0, median_height * 0.8))
+    elif y_tolerance is None:
+        y_tolerance = 14.0
 
     grouped: list[list[dict]] = []
     for entry in normalized:
@@ -227,8 +243,12 @@ def extract_statement_candidates(
     return candidates
 
 
-def render_pdf_page(path: str, page_index: int, scale: float = 2.5):
-    """渲染单个 PDF 页面供内部 OCR 使用，不返回给前端。"""
+def render_pdf_page(path: str, page_index: int, scale: float = 3.0):
+    """渲染单个 PDF 页面供内部 OCR 使用，不返回给前端。
+
+    3.0 倍（约 216 DPI）保障财报小字号金额的像素信息；低质量页可在调用方
+    提高到 4.0 重扫。
+    """
     import pypdfium2 as pdfium
 
     pdf = pdfium.PdfDocument(path)
@@ -239,9 +259,14 @@ def render_pdf_page(path: str, page_index: int, scale: float = 2.5):
 
 
 def run_ocr(image) -> list:
-    """执行 RapidOCR 并保留文字框、文本和置信度。"""
-    import numpy as np
-    from rapidocr_onnxruntime import RapidOCR
+    """执行 OCR 并返回 [文字框, 文本, 置信度] 三元组列表。
 
-    result, _ = RapidOCR()(np.array(image.convert("RGB")))
-    return result or []
+    复用 core.parser 的共享引擎（避免每页重复构造），结果经
+    normalize_ocr_result 归一，屏蔽 rapidocr 版本差异。
+    """
+    import numpy as np
+
+    engine = parser._get_ocr_engine()
+    if engine is None:
+        return []
+    return parser.normalize_ocr_result(engine(np.array(image.convert("RGB"))))

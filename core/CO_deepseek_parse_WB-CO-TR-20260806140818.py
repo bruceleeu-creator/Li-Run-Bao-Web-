@@ -53,23 +53,6 @@ def _page_text_layer(path: str, page_index: int) -> str:
         return ""
 
 
-def _ocr_page(path: str, page_index: int) -> str:
-    """渲染页面并用 RapidOCR 识别文字（扫描件回退）。"""
-    import pypdfium2 as pdfium
-    import numpy as np
-    from rapidocr_onnxruntime import RapidOCR
-
-    pdf = pdfium.PdfDocument(path)
-    try:
-        pil = pdf[page_index].render(scale=1.5).to_pil()
-    finally:
-        pdf.close()
-    result, _ = RapidOCR()(np.array(pil.convert("RGB")))
-    if not result:
-        return ""
-    return "\n".join(item[1] for item in result if item and len(item) > 1 and item[1])
-
-
 def extract_pdf_pages_text(path: str, max_pages: int = 200) -> list[str]:
     """逐页提取完整文本，供 DeepSeek 解析。
 

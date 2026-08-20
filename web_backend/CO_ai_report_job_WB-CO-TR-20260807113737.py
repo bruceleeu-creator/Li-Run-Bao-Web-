@@ -7,7 +7,6 @@ runner 只管理持久化生命周期、进度和线程；业务流水线消费 
 from __future__ import annotations
 
 import importlib
-import fcntl
 import logging
 import os
 import threading
@@ -15,6 +14,27 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
+
+try:
+    import fcntl
+except ImportError:  # Windows 无 fcntl，改用 msvcrt 实现 1 字节非阻塞排他锁
+    import msvcrt
+
+    def _flock_nb(handle) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _funlock(handle) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+
+    def _flock_nb(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _funlock(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 _db = importlib.import_module("web_backend.CO_db_WB-CO-TR-20260805160732")
 
@@ -55,8 +75,8 @@ def acquire_process_lease() -> bool:
         target.parent.mkdir(parents=True, exist_ok=True)
         handle = target.open("a+", encoding="utf-8")
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            _flock_nb(handle)
+        except OSError:
             handle.close()
             return False
         os.chmod(target, 0o600)
@@ -96,7 +116,7 @@ def _release_process_lease_locked(*, force: bool) -> bool:
         _lease_refcount -= 1
         return True
     try:
-        fcntl.flock(_lease_handle.fileno(), fcntl.LOCK_UN)
+        _funlock(_lease_handle)
     finally:
         _lease_handle.close()
         _lease_handle = None

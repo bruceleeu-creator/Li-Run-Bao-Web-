@@ -1271,7 +1271,7 @@ def test_extract_all_pages_marks_low_quality_text_failed_when_ocr_is_empty(monke
     )
     monkeypatch.setattr(reader, "_extract_text_from_document", lambda doc, i: "文本过短")
     monkeypatch.setattr(reader, "_get_ocr_engine", lambda: object())
-    monkeypatch.setattr(reader, "_extract_ocr_from_document", lambda doc, i, engine: "")
+    monkeypatch.setattr(reader, "_extract_ocr_from_document", lambda doc, i, engine: ("", 0.0))
 
     page = reader.extract_all_pages("low-quality.pdf")[0]
 
@@ -1307,7 +1307,7 @@ def test_extract_all_pages_marks_true_blank_page_blank(monkeypatch):
     )
     monkeypatch.setattr(reader, "_extract_text_from_document", lambda doc, i: "")
     monkeypatch.setattr(reader, "_get_ocr_engine", lambda: object())
-    monkeypatch.setattr(reader, "_extract_ocr_from_document", lambda doc, i, engine: "")
+    monkeypatch.setattr(reader, "_extract_ocr_from_document", lambda doc, i, engine: ("", 0.0))
 
     page = reader.extract_all_pages("blank.pdf")[0]
 
@@ -1332,7 +1332,7 @@ def test_extract_all_pages_reuses_open_documents_and_single_ocr_engine(monkeypat
     monkeypatch.setattr(reader, "_open_pdf_documents", lambda path: Documents())
     monkeypatch.setattr(reader, "_extract_text_from_document", lambda doc, i: "文本过短")
     monkeypatch.setattr(reader, "_get_ocr_engine", lambda: engine_calls.append(engine) or engine)
-    monkeypatch.setattr(reader, "_extract_ocr_from_document", lambda doc, i, active: f"OCR 第{i + 1}页")
+    monkeypatch.setattr(reader, "_extract_ocr_from_document", lambda doc, i, active: (f"OCR 第{i + 1}页", 0.9))
 
     pages = reader.extract_all_pages("two-page-scan.pdf")
 

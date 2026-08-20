@@ -83,5 +83,8 @@ config.local.py
 # Logs
 *.log
 
+# OCR 高精度模型文件（体积大、离线手动放置，不入库；见 core/parser.py _OCR_MODEL_DIR）
+models/*.onnx
+
 # Mimosa 扫描运行时产物（不入库）
 .mimosa/
