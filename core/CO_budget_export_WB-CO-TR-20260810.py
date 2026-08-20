@@ -864,6 +864,21 @@ def export_budget_3sheet(
     out = tpl_mod.write_template(
         plan, path, session=interactive_session, financial_data=data
     )
+    # 月度拆分底稿快照（模块 A 二段式）：行年度金额与写出的 G 列同源；
+    # 顶部摘要供第一稿摘要卡展示。附加键不改变既有 meta 契约。
+    meta["plan_rows"] = [
+        {
+            "row": l.row,
+            "subject": l.subject,
+            "expense_name": l.expense_name,
+            "annual": round(float(l.budget_amount or 0), 2),
+        }
+        for l in plan.lines
+    ]
+    meta["top_summary"] = {
+        "budget_revenue": round(float(plan.top_inputs.budget_revenue or 0), 2),
+        "expense_budget_cap": round(float(plan.top_computed.expense_budget_cap or 0), 2),
+    }
     meta["path"] = out
     meta["sheets"] = [
         "费用预算表",
@@ -872,3 +887,122 @@ def export_budget_3sheet(
         "费用合规筹划约束",
     ]
     return out, meta
+
+
+def append_monthly_sheet(
+    xlsx_path: str,
+    split_payload: dict,
+    out_path: Optional[str] = None,
+    mode: Optional[str] = None,
+) -> str:
+    """在第一稿工作簿末尾追加「月度执行计划」Sheet，返回新文件路径。
+
+    - 不改任何现有 Sheet（read_template 只校验指定 Sheet，天然兼容追加）；
+    - Q 列合计用公式 =SUM(E:P) 可复算，R 列校验 =Q−D 应全 0（非 0 条件标红）；
+    - 同名 Sheet 重复调用幂等覆盖；
+    - 样式沿用纸墨台账：表头加粗 + 发丝边框，无花哨填充。
+    """
+    from openpyxl import load_workbook
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    src = Path(xlsx_path)
+    if not src.exists():
+        raise FileNotFoundError(f"第一稿文件不存在：{xlsx_path}")
+    if out_path is None:
+        out_path = str(src.with_name(f"{src.stem}（含月度拆分）.xlsx"))
+    mode = mode or str((split_payload or {}).get("mode") or "rule")
+
+    wb = load_workbook(str(src))
+    sheet_name = "月度执行计划"
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    headers = (
+        ["行号", "科目名称", "费用项目", "年度预算金额"]
+        + [f"{i}月" for i in range(1, 13)]
+        + ["月度合计", "校验（合计−年度）"]
+    )
+    hair = Side(style="hair", color="9C8B6A")
+    border = Border(left=hair, right=hair, top=hair, bottom=hair)
+    header_font = Font(bold=True)
+    paper_fill = PatternFill("solid", fgColor="F3EDE2")
+    center = Alignment(horizontal="center", vertical="center")
+
+    for col, title in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col, value=title)
+        cell.font = header_font
+        cell.border = border
+        cell.alignment = center
+        cell.fill = paper_fill
+
+    rows = sorted(
+        (split_payload or {}).get("matrix") or [],
+        key=lambda r: int(r.get("row") or 0),
+    )
+    money_format = "#,##0.00"
+    first_data = 2
+    for idx, item in enumerate(rows):
+        r = first_data + idx
+        ws.cell(row=r, column=1, value=int(item.get("row") or 0))
+        ws.cell(row=r, column=2, value=str(item.get("subject") or ""))
+        ws.cell(row=r, column=3, value=str(item.get("expense_name") or ""))
+        ws.cell(row=r, column=4, value=float(item.get("annual") or 0)).number_format = money_format
+        for m in range(12):
+            months = item.get("months") or []
+            value = float(months[m]) if m < len(months) else 0.0
+            ws.cell(row=r, column=5 + m, value=value).number_format = money_format
+        ws.cell(row=r, column=17, value=f"=SUM(E{r}:P{r})").number_format = money_format
+        ws.cell(row=r, column=18, value=f"=Q{r}-D{r}").number_format = money_format
+        for col in range(1, 19):
+            c = ws.cell(row=r, column=col)
+            c.border = border
+            if col in (1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18):
+                c.alignment = center
+    last_data = first_data + len(rows) - 1
+
+    # 月度总计行 + 说明行
+    total_row = last_data + 1
+    ws.cell(row=total_row, column=1, value="合计")
+    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=4)
+    for col in range(5, 17):
+        letter = ws.cell(row=1, column=col).coordinate.rstrip("0123456789")
+        ws.cell(
+            row=total_row, column=col,
+            value=f"=SUM({letter}{first_data}:{letter}{last_data})",
+        ).number_format = money_format
+    ws.cell(row=total_row, column=17, value=f"=SUM(Q{first_data}:Q{last_data})").number_format = money_format
+    ws.cell(row=total_row, column=18, value=f"=Q{total_row}-SUM(D{first_data}:D{last_data})").number_format = money_format
+    for col in range(1, 19):
+        c = ws.cell(row=total_row, column=col)
+        c.border = border
+        c.font = Font(bold=True)
+        if col >= 4:
+            c.alignment = center
+
+    checks = (split_payload or {}).get("checks") or {}
+    note = (
+        f"拆分方式：{'AI 权重（金额由确定性引擎计算）' if mode == 'ai' else '规则默认拆分'}；"
+        f"生成时间：{(split_payload or {}).get('generated_at') or ''}；"
+        f"恒等校验：逐行 12 个月合计 = 年度预算（失败行 {int(checks.get('row_failures') or 0)}，"
+        f"总偏差 {float(checks.get('total_gap') or 0):,.2f} 元）；校验列（本列右一）应全为 0；金额单位：元。"
+    )
+    note_cell = ws.cell(row=total_row + 2, column=1, value=note)
+    note_cell.font = Font(size=9, color="5A4E3D")
+
+    # 校验列非 0 标红（数据行 + 总计行）
+    ws.conditional_formatting.add(
+        f"R{first_data}:R{total_row}",
+        CellIsRule(operator="notEqual", formula=["0"], font=Font(color="B00020", bold=True)),
+    )
+
+    widths = {1: 6, 2: 12, 3: 18, 4: 14}
+    for col in range(5, 19):
+        widths[col] = 11
+    for col, width in widths.items():
+        ws.column_dimensions[ws.cell(row=1, column=col).coordinate.rstrip("0123456789")].width = width
+    ws.freeze_panes = "A2"
+
+    wb.save(out_path)
+    return out_path

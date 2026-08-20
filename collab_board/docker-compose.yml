@@ -1,0 +1,33 @@
+# 协同看板 · 腾讯云轻量服务器单机编排
+# db 仅容器内网（不映射公网端口）；app 8080 对外（控制台防火墙另行放行）
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: board
+      POSTGRES_PASSWORD: ${BOARD_DB_PASSWORD:?请在 .env 设置 BOARD_DB_PASSWORD}
+      POSTGRES_DB: board
+    volumes:
+      - board_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U board -d board"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://board:${BOARD_DB_PASSWORD}@db:5432/board
+      JWT_SECRET: ${JWT_SECRET:?请在 .env 设置 JWT_SECRET（≥32 位随机）}
+      BOARD_ENV: prod
+    ports:
+      - "8080:8080"
+
+volumes:
+  board_pgdata:

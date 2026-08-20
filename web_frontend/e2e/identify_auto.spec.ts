@@ -9,7 +9,9 @@ const sourceFolder = path.resolve(__dirname, "../../web_backend/workspaces");
 let folder = "";
 
 test.beforeAll(() => {
-  folder = mkdtempSync(path.join(tmpdir(), "利润宝识别-"));
+  // Windows headless-shell 对多文件 setInputFiles + 中文临时路径会崩溃
+  // （0xC0000409）：临时目录用 ASCII 前缀（文件名保持中文，识别契约不变）
+  folder = mkdtempSync(path.join(tmpdir(), "lrb-e2e-id-"));
   // 用带企业名的文件名（模拟真实用户文件）
   copyFileSync(
     path.join(sourceFolder, "2021年审计报告.xlsx"),

@@ -9,7 +9,9 @@ const sourceFolder = path.resolve(__dirname, "../../web_backend/workspaces");
 let folder = "";
 
 test.beforeAll(() => {
-  folder = mkdtempSync(path.join(tmpdir(), "利润宝三年财报-"));
+  // Windows headless-shell 对多文件 setInputFiles + 中文临时路径会崩溃
+  // （0xC0000409）：临时目录用 ASCII 前缀规避（文件名本身保持中文契约）
+  folder = mkdtempSync(path.join(tmpdir(), "lrb-e2e-3y-"));
   for (const year of [2021, 2022, 2023]) {
     const name = `${year}年审计报告.xlsx`;
     copyFileSync(path.join(sourceFolder, name), path.join(folder, name));

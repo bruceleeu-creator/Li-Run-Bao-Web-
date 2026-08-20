@@ -352,3 +352,21 @@ def get_budget_export_path(job_id: str) -> Optional[Path]:
         return None
     p = Path(job.path)
     return p if p.exists() else None
+
+
+def get_budget_export_full(job_id: str) -> Optional[dict]:
+    """读取任务完整信息（含全量 meta，如 plan_rows 快照）。
+
+    月度拆分模块用；to_dict 只暴露 meta 子集，此 getter 不改变既有契约。
+    """
+    job = _jobs.get(job_id)
+    if job is None:
+        return None
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "stage": job.stage,
+        "path": job.path,
+        "filename": job.filename,
+        "meta": dict(job.meta),
+    }

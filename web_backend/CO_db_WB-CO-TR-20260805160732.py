@@ -223,6 +223,24 @@ def init_db() -> None:
                 diagnosis_json TEXT NOT NULL DEFAULT '',
                 interaction_json TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS monthly_budget_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_version TEXT NOT NULL UNIQUE,
+                stage TEXT NOT NULL,
+                advice_fingerprint TEXT NOT NULL DEFAULT '',
+                draft_job_id TEXT DEFAULT '',
+                draft_path TEXT DEFAULT '',
+                plan_snapshot TEXT DEFAULT '',
+                draft_meta TEXT DEFAULT '',
+                question_source TEXT DEFAULT '',
+                questions TEXT DEFAULT '',
+                answers TEXT DEFAULT '',
+                split_job_id TEXT DEFAULT '',
+                split_mode TEXT DEFAULT '',
+                split_result TEXT DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL DEFAULT 0
+            );
             """
         )
         _ensure_columns(conn)
@@ -1500,3 +1518,85 @@ def recover_orphaned_jobs(
             (_now(), current_owner_token),
         )
     return int(cursor.rowcount)
+
+
+# ── 月度拆分流程状态（模块 A 二段式，每 session_version 一行） ────────────
+# stage：draft|questions|answered|splitting|ready|failed|skipped
+# plan_snapshot/questions/answers/split_result/draft_meta 存 JSON 字符串。
+
+_MONTHLY_STATE_COLUMNS = (
+    "stage", "advice_fingerprint", "draft_job_id", "draft_path",
+    "plan_snapshot", "draft_meta", "question_source", "questions",
+    "answers", "split_job_id", "split_mode", "split_result",
+)
+_MONTHLY_STATE_JSON_COLUMNS = {
+    "plan_snapshot", "draft_meta", "questions", "answers", "split_result",
+}
+
+
+def upsert_monthly_state(session_version: str, **fields) -> None:
+    """按 session_version UPSERT 月度流程状态行。
+
+    JSON 列自动序列化；首次插入必须带 stage 与 advice_fingerprint
+    （表上 NOT NULL），否则抛 ValueError。
+    """
+    cols = []
+    params: list = []
+    for key, value in fields.items():
+        if key not in _MONTHLY_STATE_COLUMNS:
+            continue
+        if key in _MONTHLY_STATE_JSON_COLUMNS and value is not None and not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False)
+        cols.append(key)
+        params.append(value)
+    if not cols:
+        return
+    version = str(session_version or "")
+    init_db()
+    now = time.time()
+    with _lock, _connect() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM monthly_budget_state WHERE session_version = ?", (version,)
+        ).fetchone()
+        if existing is None and ("stage" not in cols or "advice_fingerprint" not in cols):
+            raise ValueError("首次写入月度状态必须包含 stage 与 advice_fingerprint")
+        colnames = ", ".join(cols)
+        qs = ", ".join("?" for _ in cols)
+        sets = ", ".join(f"{c} = excluded.{c}" for c in cols)
+        conn.execute(
+            f"""
+            INSERT INTO monthly_budget_state (
+                session_version, {colnames}, created_at, updated_at
+            ) VALUES (?, {qs}, ?, ?)
+            ON CONFLICT(session_version) DO UPDATE SET {sets}, updated_at = excluded.updated_at
+            """,
+            (version, *params, now, now),
+        )
+
+
+def get_monthly_state(session_version: str) -> dict | None:
+    """读取月度流程状态；JSON 列解析为对象，无记录返回 None。"""
+    init_db()
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM monthly_budget_state WHERE session_version = ?",
+            (str(session_version or ""),),
+        ).fetchone()
+    if row is None:
+        return None
+    state = dict(row)
+    for col in _MONTHLY_STATE_JSON_COLUMNS:
+        raw = state.get(col) or ""
+        state[col] = json.loads(raw) if raw else None
+    return state
+
+
+def delete_monthly_state(session_version: str) -> bool:
+    """删除月度流程状态行（勾选指纹变化/重新导入时重置）。"""
+    init_db()
+    with _lock, _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM monthly_budget_state WHERE session_version = ?",
+            (str(session_version or ""),),
+        )
+        return cursor.rowcount > 0

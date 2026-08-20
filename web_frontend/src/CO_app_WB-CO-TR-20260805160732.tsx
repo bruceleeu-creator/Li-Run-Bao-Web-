@@ -34,11 +34,22 @@ import {
   startYearsSummaryJob,
   submitDecision,
   summarizePreview,
+  downloadMonthlyBudget,
+  fetchBudgetDraft,
+  fetchMonthlyResult,
+  genMonthlyQuestions,
+  getMonthlyState,
+  pollMonthlySplit,
+  startBudgetDraft,
+  submitMonthlyAnswers,
   type AIReportDetail,
   type AIReportItem,
   type AIReportJob,
   type BudgetAdviceItem,
   type BudgetAdviceResponse,
+  type MonthlyQuestion,
+  type MonthlySplitResult,
+  type MonthlyState,
   type ReportAnalysisResponse,
 } from "./CO_api_WB-CO-TR-20260805160732";
 import type {
@@ -2092,6 +2103,70 @@ function InteractionPage({
   );
 }
 
+/** 月度拆分预览：按科目聚合的 12 月透视表（行级 ✓ = Σ月=年 校验通过） */
+function MonthlyPreview({
+  result,
+  fmtYuan,
+}: {
+  result: MonthlySplitResult;
+  fmtYuan: (n: number) => string;
+}) {
+  const bySubject = new Map<string, { months: number[]; annual: number; ok: boolean }>();
+  for (const row of result.matrix || []) {
+    const cur = bySubject.get(row.subject) || { months: new Array(12).fill(0), annual: 0, ok: true };
+    (row.months || []).forEach((v, i) => {
+      if (i < 12) cur.months[i] += Number(v) || 0;
+    });
+    cur.annual += Number(row.annual) || 0;
+    const sum = (row.months || []).reduce((a, b) => a + (Number(b) || 0), 0);
+    if (Math.round(sum) !== Math.round(Number(row.annual) || 0)) cur.ok = false;
+    bySubject.set(row.subject, cur);
+  }
+  const subjects = [...bySubject.entries()].filter(([, v]) => v.annual > 0);
+  return (
+    <div className="monthly-table-wrap">
+      <table className="monthly-table">
+        <thead>
+          <tr>
+            <th>科目</th>
+            {Array.from({ length: 12 }, (_, i) => (
+              <th key={i}>{i + 1}月</th>
+            ))}
+            <th>年度</th>
+            <th>Σ月=年</th>
+          </tr>
+        </thead>
+        <tbody>
+          {subjects.map(([subject, v]) => (
+            <tr key={subject}>
+              <td className="monthly-table__subject">{subject}</td>
+              {v.months.map((m, i) => (
+                <td key={i}>{fmtYuan(m)}</td>
+              ))}
+              <td className="monthly-table__annual">{fmtYuan(v.annual)}</td>
+              <td className={v.ok ? "monthly-table__ok" : "monthly-table__bad"}>
+                {v.ok ? "✓" : "✗"}
+              </td>
+            </tr>
+          ))}
+          <tr className="monthly-table__total">
+            <td>合计</td>
+            {(result.month_totals || []).map((m, i) => (
+              <td key={i}>{fmtYuan(m)}</td>
+            ))}
+            <td>{fmtYuan(result.grand_total)}</td>
+            <td>
+              {result.checks?.row_failures === 0 && Number(result.checks?.total_gap || 0) === 0
+                ? "✓"
+                : "✗"}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked: boolean }) {
   const [busyKind, setBusyKind] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -2108,6 +2183,17 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
   const [adviceNote, setAdviceNote] = useState("");
   const [requireConfirm, setRequireConfirm] = useState(false);
   const [qualityAck, setQualityAck] = useState(false);
+  // ② 月度拆分四步向导：第一稿 → 问答 → 拆分 → 含月度导出
+  const [monthly, setMonthly] = useState<MonthlyState | null>(null);
+  const [monthlyQuestions, setMonthlyQuestions] = useState<MonthlyQuestion[]>([]);
+  const [monthlySource, setMonthlySource] = useState("");
+  const [monthlyAnswers, setMonthlyAnswers] = useState<Record<string, string>>({});
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [draftProgress, setDraftProgress] = useState("");
+  const [splitBusy, setSplitBusy] = useState(false);
+  const [splitProgress, setSplitProgress] = useState("");
+  const [monthlyResult, setMonthlyResult] = useState<MonthlySplitResult | null>(null);
+  const [adviceDirty, setAdviceDirty] = useState(false);
 
   useEffect(() => {
     if (!session.session) return;
@@ -2138,6 +2224,28 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
     });
   }, [session.session, session.data_quality, unlocked]);
 
+  // 月度拆分状态恢复：按 stage 定位到对应步骤（刷新/历史载入不丢、不重复消耗 AI）
+  useEffect(() => {
+    if (!session.session) return;
+    void getMonthlyState()
+      .then((s) => {
+        setMonthly(s);
+        if (s.questions?.length) {
+          setMonthlyQuestions(s.questions);
+          setMonthlySource(s.question_source || "");
+        }
+        if (s.answers?.length) {
+          const map: Record<string, string> = {};
+          for (const a of s.answers) map[a.id] = a.value;
+          setMonthlyAnswers(map);
+        }
+        if (s.split_result) setMonthlyResult(s.split_result);
+      })
+      .catch(() => {
+        /* 未导入等场景忽略 */
+      });
+  }, [session.session]);
+
   const loadAnalysis = async () => {
     setAnalysisBusy(true);
     setError("");
@@ -2164,6 +2272,7 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
   const loadAdvice = async () => {
     setAdviceBusy(true);
     setError("");
+    setAdviceDirty(true); // 重新生成建议 → 第一稿与拆分状态作废
     setAdviceNote("DeepSeek 全量编制中（按销售/管理/财务等科目分批）…");
     try {
       const resp = await generateBudgetAdvice(true);
@@ -2186,6 +2295,145 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
   const selectedSum = adviceItems
     .filter((i) => i.selected)
     .reduce((a, b) => a + (Number(b.budget_amount) || 0), 0);
+
+  // ── 月度拆分四步向导（② 段内嵌，不动 ① 段与分割线） ─────────────────
+  const monthlyStage = monthly?.stage || "none";
+  const monthlyAdvanced = ["questions", "answered", "splitting", "ready"].includes(monthlyStage);
+
+  const refreshMonthly = async () => {
+    const s = await getMonthlyState();
+    setMonthly(s);
+    return s;
+  };
+
+  /** 第一步：生成预算第一稿（复用预算管线，不下载） */
+  const startDraftFlow = () => {
+    const picked = adviceItems.filter((i) => i.selected);
+    if (!advice || picked.length === 0) {
+      setError("请先完成「费用编制建议」并勾选要填入的费用项，再生成预算第一稿。");
+      document.getElementById("budget-advice")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    setDraftBusy(true);
+    setError("");
+    setDraftProgress("");
+    setAdviceDirty(false);
+    setMonthlyQuestions([]);
+    setMonthlyAnswers({});
+    setMonthlyResult(null);
+    setSplitProgress("");
+    void (async () => {
+      try {
+        const started = await startBudgetDraft(picked);
+        let job = started;
+        setDraftProgress(`已排队 · 将填入 ${picked.length} 条编制建议`);
+        const deadline = Date.now() + 8 * 60 * 1000;
+        while (Date.now() < deadline) {
+          if (job.status === "completed") break;
+          if (job.status === "failed") throw new Error(job.error || job.message || "第一稿生成失败");
+          const pct = typeof job.progress === "number" ? `${job.progress}%` : "";
+          setDraftProgress(`${job.stage || ""} ${pct} ${job.message || ""}`.trim());
+          await new Promise((r) => setTimeout(r, 1200));
+          job = await fetchBudgetDraft(job.job_id);
+        }
+        if (job.status !== "completed") throw new Error("第一稿生成超时，请重试");
+        const s = await refreshMonthly();
+        setDraftProgress(
+          `第一稿就绪：非空费用行 ${s.summary?.filled_lines ?? "—"}/84`
+          + (s.summary?.advice_applied ? ` · 已填入建议 ${s.summary.advice_applied} 项` : ""),
+        );
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setDraftProgress("第一稿生成失败，可重试。");
+      } finally {
+        setDraftBusy(false);
+      }
+    })();
+  };
+
+  /** 第二步：出题（AI 优先回退规则题库）— 第一稿就绪后自动进入 */
+  const ensureQuestions = async () => {
+    try {
+      const resp = await genMonthlyQuestions();
+      setMonthlyQuestions(resp.questions);
+      setMonthlySource(resp.source);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => {
+    if (monthlyStage === "draft" && !monthlyQuestions.length && !draftBusy) {
+      void ensureQuestions();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [monthlyStage, draftBusy]);
+
+  /** 第三步：提交答案（缺失项由后端按题面默认补齐） */
+  const submitAnswersFlow = () => {
+    setMonthly((s) => (s ? { ...s, stage: "answered" } : s));
+    void (async () => {
+      try {
+        const payload = monthlyQuestions.map((q) => ({
+          id: q.id,
+          value: monthlyAnswers[q.id] ?? q.default ?? "",
+        }));
+        await submitMonthlyAnswers(payload);
+        await refreshMonthly();
+      } catch (e) {
+        setMonthly((s) => (s ? { ...s, stage: "questions" } : s));
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+  };
+
+  /** 第三步→第四步：月度拆分（AI 权重 → 引擎算金额 → 恒等校验） */
+  const runSplitFlow = () => {
+    setSplitBusy(true);
+    setError("");
+    setSplitProgress("");
+    void (async () => {
+      try {
+        const job = await pollMonthlySplit((j) => {
+          const pct = typeof j.progress === "number" ? `${j.progress}%` : "";
+          setSplitProgress(`${pct} ${j.message || ""}`.trim());
+        });
+        if (job.status === "failed") throw new Error(job.error || job.message || "拆分失败");
+        const result = await fetchMonthlyResult();
+        setMonthlyResult(result);
+        await refreshMonthly();
+        setSplitProgress(
+          `拆分完成（${result.mode === "ai" ? "AI 权重" : "规则默认"}拆分）`
+          + (result.warnings?.length ? ` · ${result.warnings.length} 条提示` : ""),
+        );
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setSplitProgress("拆分失败，可重试。");
+      } finally {
+        setSplitBusy(false);
+      }
+    })();
+  };
+
+  /** 第四步：导出含月度拆分的三表 */
+  const downloadMonthlyFlow = () => {
+    if (monthlyStage !== "ready" || !monthlyResult) {
+      setError("请先完成月度拆分，再导出含月度拆分的预算三表。");
+      return;
+    }
+    setBusyKind("budget");
+    setError("");
+    void (async () => {
+      try {
+        await downloadMonthlyBudget();
+        setAdviceNote("已导出费用预算三表（含月度执行计划 Sheet，恒等校验全 0）。");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusyKind(null);
+      }
+    })();
+  };
 
   const onExport = (kind: "word" | "pdf" | "excel" | "budget") => {
     // 预算三表：导入后即可导出；其余需解锁
@@ -2252,12 +2500,14 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
   };
 
   const toggleItem = (row: number) => {
+    if (monthlyAdvanced) setAdviceDirty(true);
     setAdviceItems((list) =>
       list.map((it) => (it.row === row ? { ...it, selected: !it.selected } : it)),
     );
   };
 
   const selectAll = (on: boolean) => {
+    if (monthlyAdvanced) setAdviceDirty(true);
     setAdviceItems((list) => list.map((it) => ({ ...it, selected: on })));
   };
 
@@ -2466,12 +2716,20 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
                   <button
                     type="button"
                     className="btn btn--primary"
-                    disabled={adviceBusy || busyKind !== null || selectedCount === 0}
-                    onClick={onExportWithAdvice}
+                    disabled={adviceBusy || busyKind !== null || draftBusy || selectedCount === 0}
+                    onClick={startDraftFlow}
+                    title="先按勾选生成年度第一稿（不下载），再进入月度拆分问答"
                   >
-                    {busyKind === "budget"
-                      ? "导出填入中…"
-                      : `导出费用预算三表（自动填入 ${selectedCount} 项）`}
+                    {draftBusy ? "第一稿生成中…" : "生成预算第一稿"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={adviceBusy || busyKind !== null || draftBusy || selectedCount === 0}
+                    onClick={onExportWithAdvice}
+                    title="跳过月度拆分：直接按旧版流程导出年度三表"
+                  >
+                    跳过拆分·导出旧版三表
                   </button>
                 </>
               ) : null}
@@ -2550,9 +2808,209 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
               </>
             ) : (
               <p className="panel__note">
-                请先点「生成费用编制建议」。完成勾选后，再导出费用预算三表，内容会自动填入。
+                请先点「生成费用编制建议」。完成勾选后点「生成预算第一稿」，再进入月度拆分。
               </p>
             )}
+
+            {/* ② 月度拆分四步向导：第一稿 → 问答 → 拆分 → 含月度导出 */}
+            {monthlyStage !== "none" ? (
+              <div className="monthly-wizard" id="monthly-wizard">
+                <h4 className="monthly-wizard__title">
+                  月度拆分 · 从年度目标到逐月执行计划
+                </h4>
+                {adviceDirty ? (
+                  <div className="status status--warn" role="alert">
+                    编制建议已变化：第一稿与月度拆分结果已失效，请重新点「生成预算第一稿」。
+                  </div>
+                ) : null}
+
+                {/* 步骤 2：预算第一稿（就绪后自动进入问答） */}
+                <div className="monthly-step">
+                  <div className="monthly-step__head">
+                    <span className="monthly-step__no">第 1 步</span>
+                    <strong>预算第一稿（年度底稿，此处不下载）</strong>
+                  </div>
+                  {draftProgress ? (
+                    <div className="status status--info" role="status">
+                      第一稿：{draftProgress}
+                    </div>
+                  ) : null}
+                  {monthly?.summary ? (
+                    <div className="diag-summary" style={{ marginBottom: 10 }}>
+                      <div className="diag-metric">
+                        <span className="diag-metric__label">年度营收</span>
+                        <strong className="diag-metric__value">{fmtYuan(monthly.summary.revenue)}</strong>
+                      </div>
+                      <div className="diag-metric">
+                        <span className="diag-metric__label">费用总盘子</span>
+                        <strong className="diag-metric__value">{fmtYuan(monthly.summary.expense_total)}</strong>
+                      </div>
+                      <div className="diag-metric">
+                        <span className="diag-metric__label">费用率</span>
+                        <strong className="diag-metric__value">
+                          {(Number(monthly.summary.fee_rate || 0) * 100).toFixed(2)}%
+                        </strong>
+                      </div>
+                      <div className="diag-metric">
+                        <span className="diag-metric__label">非空费用行</span>
+                        <strong className="diag-metric__value">{monthly.summary.filled_lines}/84</strong>
+                      </div>
+                      <div className="diag-metric">
+                        <span className="diag-metric__label">已填建议</span>
+                        <strong className="diag-metric__value">{monthly.summary.advice_applied} 项</strong>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* 步骤 3：月度拆分问答（AI 出题，未配置时规则题库兜底） */}
+                {["draft", "questions", "answered"].includes(monthlyStage) && monthlyQuestions.length > 0 ? (
+                  <div className="monthly-step">
+                    <div className="monthly-step__head">
+                      <span className="monthly-step__no">第 2 步</span>
+                      <strong>月度拆分问答</strong>
+                      <span className="advice-item__tag">
+                        {monthlySource === "ai" ? "AI 出题" : "规则题库"}
+                      </span>
+                    </div>
+                    <p className="panel__note">
+                      回答经营节奏问题，AI 按方向把年度预算拆到 12 个月；每题都有推荐项，一路默认也能走通。
+                    </p>
+                    {monthlyStage !== "answered" ? (
+                      <>
+                        {monthlyQuestions.map((q) => (
+                          <div key={q.id} className="field" style={{ marginBottom: 10 }}>
+                            <span className="field__label">{q.title}</span>
+                            {q.type === "single" ? (
+                              <div className="monthly-options">
+                                {q.options.map((opt) => (
+                                  <label key={opt} className="monthly-option">
+                                    <input
+                                      type="radio"
+                                      name={`mo-${q.id}`}
+                                      checked={(monthlyAnswers[q.id] ?? q.default) === opt}
+                                      onChange={() =>
+                                        setMonthlyAnswers((m) => ({ ...m, [q.id]: opt }))
+                                      }
+                                    />
+                                    <span>
+                                      {opt}
+                                      {opt === q.default ? "（推荐）" : ""}
+                                    </span>
+                                  </label>
+                                ))}
+                              </div>
+                            ) : (
+                              <textarea
+                                className="monthly-text"
+                                rows={2}
+                                placeholder={q.placeholder || "无则留空"}
+                                value={monthlyAnswers[q.id] ?? ""}
+                                onChange={(e) =>
+                                  setMonthlyAnswers((m) => ({ ...m, [q.id]: e.target.value }))
+                                }
+                              />
+                            )}
+                          </div>
+                        ))}
+                        <div className="ai-actions">
+                          <button
+                            type="button"
+                            className="btn btn--ghost"
+                            onClick={() => {
+                              const defaults: Record<string, string> = {};
+                              for (const q of monthlyQuestions) defaults[q.id] = q.default || "";
+                              setMonthlyAnswers(defaults);
+                            }}
+                          >
+                            全部按推荐项
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--primary"
+                            disabled={splitBusy}
+                            onClick={submitAnswersFlow}
+                          >
+                            提交答案，进入拆分
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="status status--ok" role="status">
+                        答案已提交。可开始月度拆分。
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+
+                {/* 步骤 4：拆分结果与导出 */}
+                {["answered", "splitting", "ready"].includes(monthlyStage) ? (
+                  <div className="monthly-step">
+                    <div className="monthly-step__head">
+                      <span className="monthly-step__no">第 3 步</span>
+                      <strong>拆分结果与导出</strong>
+                    </div>
+                    {splitProgress ? (
+                      <div className="status status--info" role="status">
+                        月度拆分：{splitProgress}
+                      </div>
+                    ) : null}
+                    {monthlyStage === "ready" && monthlyResult ? (
+                      <>
+                        {monthlyResult.warnings?.length ? (
+                          <div className="status status--warn" role="alert">
+                            提示（只提示不改数）：{monthlyResult.warnings.slice(0, 3).join("；")}
+                            {monthlyResult.warnings.length > 3
+                              ? ` 等 ${monthlyResult.warnings.length} 条`
+                              : ""}
+                          </div>
+                        ) : null}
+                        <p className="panel__note">
+                          拆分方式：{monthlyResult.mode === "ai" ? "AI 权重" : "规则默认"}
+                          {monthlyResult.mode === "rule" ? "（本次为规则默认拆分）" : ""}
+                          {" · "}生成时间 {monthlyResult.generated_at || "—"}
+                          {" · "}恒等校验：逐行 12 个月合计 = 年度预算
+                          （失败行 {monthlyResult.checks?.row_failures ?? 0}，总偏差{" "}
+                          {Number(monthlyResult.checks?.total_gap ?? 0).toLocaleString("zh-CN")} 元）。
+                        </p>
+                        <MonthlyPreview result={monthlyResult} fmtYuan={fmtYuan} />
+                        <div className="ai-actions">
+                          <button
+                            type="button"
+                            className="btn btn--primary"
+                            disabled={busyKind !== null || splitBusy}
+                            onClick={downloadMonthlyFlow}
+                          >
+                            {busyKind === "budget" ? "导出中…" : "导出费用预算三表（含月度拆分）"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--ghost"
+                            disabled={busyKind !== null || splitBusy}
+                            onClick={runSplitFlow}
+                          >
+                            重新拆分
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      monthlyStage !== "splitting" && (
+                        <div className="ai-actions">
+                          <button
+                            type="button"
+                            className="btn btn--primary"
+                            disabled={splitBusy || draftBusy}
+                            onClick={runSplitFlow}
+                          >
+                            {splitBusy ? "拆分中…" : "开始月度拆分"}
+                          </button>
+                        </div>
+                      )
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           {/* ② 测算模型 + 预算三表卡片 */}
@@ -2592,7 +3050,7 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
                       ? "成本优化测算模型（可逐月跟踪）"
                       : kind === "budget"
                         ? budgetReady
-                          ? `自动填入已勾选 ${selectedCount} 条 DeepSeek 建议`
+                          ? `旧版直出：跳过月度拆分（自动填入 ${selectedCount} 项）`
                           : "请先完成②费用编制建议并勾选"
                         : item.note ?? ""}
                   </span>

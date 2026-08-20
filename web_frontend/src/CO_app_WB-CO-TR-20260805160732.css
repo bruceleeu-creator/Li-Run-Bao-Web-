@@ -2353,3 +2353,123 @@ select.input {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* ── 月度拆分向导（纸墨台账：方角、发丝线、无动画） ──────────────────── */
+
+.monthly-wizard {
+  margin-top: 14px;
+  padding: 14px 16px;
+  background: var(--sheet-2);
+  border: 1px solid var(--rule);
+}
+
+.monthly-wizard__title {
+  margin: 0 0 10px;
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.monthly-step {
+  padding: 10px 0 12px;
+  border-top: 1px solid var(--rule);
+}
+
+.monthly-step:first-of-type {
+  border-top: 0;
+}
+
+.monthly-step__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--ink);
+}
+
+.monthly-step__no {
+  flex: none;
+  font-size: 12px;
+  color: var(--ink-dim);
+  border: 1px solid var(--rule-strong);
+  padding: 1px 6px;
+}
+
+.monthly-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 4px;
+}
+
+.monthly-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.monthly-text {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--sheet);
+  border: 1px solid var(--rule-strong);
+}
+
+.monthly-table-wrap {
+  overflow-x: auto;
+  margin: 8px 0 12px;
+  border: 1px solid var(--rule);
+}
+
+.monthly-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.monthly-table th,
+.monthly-table td {
+  padding: 4px 8px;
+  border: 1px solid var(--rule);
+  text-align: right;
+  color: var(--ink-2);
+}
+
+.monthly-table th {
+  background: var(--sheet-3);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.monthly-table__subject {
+  text-align: left;
+  font-weight: 600;
+}
+
+.monthly-table__annual {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.monthly-table__ok {
+  color: oklch(48% 0.1 150);
+  font-weight: 700;
+}
+
+.monthly-table__bad {
+  color: oklch(45% 0.16 28);
+  font-weight: 700;
+}
+
+.monthly-table__total td {
+  background: var(--sheet-3);
+  font-weight: 700;
+  color: var(--ink);
+}

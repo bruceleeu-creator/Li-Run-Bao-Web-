@@ -2409,3 +2409,143 @@ def analyze_operating_narrative(context: dict) -> tuple[dict, str, str]:
     summary = str(obj.get("summary") or "").strip()
     return obj, summary[:400], ""
 
+
+# ── 月度拆分（模块 A 二段式：AI 只出题/出权重，绝不产出金额） ────────────
+
+MONTHLY_QUESTIONS_MAX_TOKENS = 4096
+MONTHLY_WEIGHTS_MAX_TOKENS = 4096
+
+
+def generate_monthly_questions(
+    plan_snapshot: dict,
+    hints: dict | None = None,
+) -> tuple[list[dict], str]:
+    """基于第一稿快照生成 4~6 个月度拆分澄清问题。
+
+    返回 (questions, error)；结构非法/未配置 AI 时 questions 为空列表、
+    error 非空，由调用方回退规则题库（流程不中断）。
+    """
+    engine = _engine(timeout=60.0)
+    if engine is None:
+        return [], "大模型未配置"
+    rows = (plan_snapshot or {}).get("rows") or []
+    catalog = [
+        {
+            "row": r.get("row"),
+            "subject": r.get("subject"),
+            "expense_name": r.get("expense_name"),
+            "annual": r.get("annual"),
+        }
+        for r in rows
+        if isinstance(r, dict) and float(r.get("annual") or 0) > 0
+    ][:40]
+    if not catalog:
+        return [], "第一稿快照缺少非零费用行"
+
+    prompt = (
+        "根据下面的年度费用预算行目录与企业信息，生成 4~6 个用于「月度拆分方向」的澄清问题。\n"
+        "只返回 JSON 对象：{\"questions\":[{\"id\":\"q_xxx\",\"type\":\"single\"或\"text\","
+        "\"title\":\"...\",\"options\":[\"...\"],\"default\":\"...\",\"placeholder\":\"...\"}]}。\n"
+        "要求：id 用英文小写加下划线且不重复；single 题至少 2 个选项且 default 必须是选项之一；"
+        "text 题 default 为空串、placeholder 给填写示例；问题必须覆盖：收入季节性、"
+        "人员薪酬与年终奖节奏、房租等固定费用是否平摊、广宣投放节奏、一次性大额支出"
+        "（格式：月份+金额+费用项目）；题目贴合给出的费用科目构成；只输出 JSON。\n"
+        f"企业信息：{json.dumps(hints or {}, ensure_ascii=False)}\n"
+        f"费用行目录：{json.dumps(catalog, ensure_ascii=False)}"
+    )
+    try:
+        result = engine.chat_result(
+            prompt,
+            system_prompt="你是预算编制问答助手，只输出 JSON，不输出任何解释。",
+            max_tokens=MONTHLY_QUESTIONS_MAX_TOKENS,
+            extra={"response_format": {"type": "json_object"}, "stream": False},
+        )
+        parsed = _parse_budget_json(result.content)
+    except Exception as e:
+        return [], f"出题失败：{e}"
+
+    raw = parsed.get("questions")
+    if not isinstance(raw, list) or not (4 <= len(raw) <= 6):
+        return [], "AI 问题数量非法（须 4~6 题）"
+    questions: list[dict] = []
+    seen_ids: set = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            return [], "AI 问题结构非法"
+        qid = str(item.get("id") or "").strip()
+        qtype = str(item.get("type") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if not qid or not qid.replace("_", "").isalnum() or qid in seen_ids:
+            return [], "AI 问题 id 非法或重复"
+        if qtype not in ("single", "text") or not title:
+            return [], "AI 问题 type/title 非法"
+        default = str(item.get("default") or "").strip()
+        options = [str(o) for o in (item.get("options") or []) if str(o).strip()]
+        if qtype == "single":
+            if len(options) < 2:
+                return [], "single 题选项不足"
+            if default not in options:
+                default = options[0]
+        else:
+            default = ""
+        questions.append({
+            "id": qid, "type": qtype, "title": title,
+            "options": options, "default": default,
+            "placeholder": str(item.get("placeholder") or ""),
+        })
+        seen_ids.add(qid)
+    return questions, ""
+
+
+def generate_monthly_weights(
+    plan_snapshot: dict,
+    answers: dict,
+    hints: dict | None = None,
+) -> tuple[list[dict], str]:
+    """按用户答案为第一稿逐行生成 12 个月分布权重。
+
+    返回 (rows, error)；rows 项：{row, shape, weights[12], note}。
+    金额一律由确定性引擎按「年度金额×权重」计算——提示词硬规则禁止 AI
+    输出/改写金额，note 出现数字仅记白名单告警（不改数）。
+    """
+    engine = _engine(timeout=120.0)
+    if engine is None:
+        return [], "大模型未配置"
+    rows = [
+        r for r in (plan_snapshot or {}).get("rows") or []
+        if isinstance(r, dict) and float(r.get("annual") or 0) > 0
+    ]
+    if not rows:
+        return [], "第一稿快照缺少非零费用行"
+
+    prompt = (
+        "把下列年度费用预算行拆分为 12 个月的分布权重。\n"
+        "只返回 JSON：{\"rows\":[{\"row\":14,"
+        "\"shape\":\"uniform|front_load|back_load|peak|lump|custom\","
+        "\"weights\":[12 个非负小数，合计≈1],\"note\":\"依据\"}]}。\n"
+        "硬规则：1) 逐行给出，row 必须来自目录；2) weights 只表示分布形状，"
+        "金额由系统按「年度金额×权重」计算，你绝不能计算或改写任何金额；"
+        "3) note 不得出现任何数字（含月份、倍数、金额），只用文字描述节奏；"
+        "4) 依据用户回答定形状：工资房租折旧等刚性费用应接近均匀；"
+        "年终奖提成类集中在春节所在月；广宣营销类按投放节奏前置或集中；"
+        "一次性支出全额落在用户指定月份。\n"
+        f"预算年：{(hints or {}).get('budget_year')}\n春节所在月：{(hints or {}).get('spring_month')}\n"
+        f"用户回答：{json.dumps(answers or {}, ensure_ascii=False)}\n"
+        f"费用行目录：{json.dumps(rows, ensure_ascii=False)}"
+    )
+    try:
+        result = engine.chat_result(
+            prompt,
+            system_prompt="你是预算月度拆分助手，只决定分布形状，绝不改金额。只输出 JSON。",
+            max_tokens=MONTHLY_WEIGHTS_MAX_TOKENS,
+            extra={"response_format": {"type": "json_object"}, "stream": False},
+        )
+        parsed = _parse_budget_json(result.content)
+    except Exception as e:
+        return [], f"权重生成失败：{e}"
+
+    out = parsed.get("rows")
+    if not isinstance(out, list) or not out:
+        return [], "AI 权重结构非法"
+    return out, ""
+

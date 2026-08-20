@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+psycopg[binary]
+psycopg-pool
+bcrypt
+pyjwt
+openpyxl
+python-multipart

@@ -45,6 +45,14 @@ web_frontend/dist/
 web_frontend/test-results/
 web_frontend/playwright-report/
 
+# 协同看板（模块 B）：前端依赖与构建产物（部署时随包上传，不入库）
+collab_board/board_frontend/node_modules/
+collab_board/board_frontend/dist/
+collab_board/board_frontend/test-results/
+collab_board/board_frontend/playwright-report/
+# P2 预留的本地端看板对接配置（含老板 token，禁止入库）
+.board_config.json
+
 # Web 后端本地工作区（用户上传文件、运行时 DB，不入库）
 # 用内容通配而非目录忽略，便于放行 e2e 必需夹具
 web_backend/workspaces/*

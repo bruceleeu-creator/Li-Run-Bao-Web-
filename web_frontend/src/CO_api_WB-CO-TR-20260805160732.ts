@@ -581,3 +581,178 @@ export interface BudgetPlanResponse {
 export async function fetchBudgetFromSession(): Promise<BudgetPlanResponse> {
   return request("/api/budget/from-session", { method: "POST" });
 }
+
+// ── 月度拆分（模块 A 二段式：第一稿 → 问答 → 拆分 → 导出） ────────────────
+// 数字安全：AI 只出题/出权重，金额全部由确定性引擎计算并恒等校验（Σ月=年）。
+
+export interface MonthlySummary {
+  revenue: number;
+  expense_total: number;
+  fee_rate: number;
+  filled_lines: number;
+  advice_applied: number;
+}
+
+export interface MonthlyPlanRow {
+  row: number;
+  subject: string;
+  expense_name: string;
+  annual: number;
+}
+
+export interface MonthlyQuestion {
+  id: string;
+  type: "single" | "text" | string;
+  title: string;
+  options: string[];
+  default: string;
+  placeholder: string;
+}
+
+export interface MonthlyMatrixRow {
+  row: number;
+  subject: string;
+  expense_name: string;
+  annual: number;
+  months: number[];
+  shape: string;
+  shape_note: string;
+}
+
+export interface MonthlySplitResult {
+  matrix: MonthlyMatrixRow[];
+  month_totals: number[];
+  grand_total: number;
+  mode: "ai" | "rule" | string;
+  warnings: string[];
+  checks: { row_failures: number; total_gap: number };
+  generated_at?: string;
+  stage?: string;
+}
+
+export interface MonthlyState {
+  stage:
+    | "none" | "draft" | "questions" | "answered" | "splitting" | "ready"
+    | "failed" | "skipped" | string;
+  session_version?: string;
+  advice_fingerprint?: string;
+  plan_snapshot?: { rows?: MonthlyPlanRow[]; top_summary?: { budget_revenue?: number } } | null;
+  draft_meta?: MonthlySummary | null;
+  question_source?: string;
+  questions?: MonthlyQuestion[] | null;
+  answers?: { id: string; value: string }[] | null;
+  split_mode?: string;
+  split_result?: MonthlySplitResult | null;
+  summary?: MonthlySummary;
+}
+
+export interface BudgetDraftJob extends BudgetExportJob {
+  monthly_stage?: string;
+  summary?: MonthlySummary | null;
+  advice_fingerprint?: string;
+}
+
+export interface MonthlySplitJob {
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  progress: number;
+  message: string;
+  error?: string;
+}
+
+/** 启动第一稿任务：复用预算管线，产出快照不触发下载。 */
+export async function startBudgetDraft(
+  adviceItems?: BudgetAdviceItem[],
+): Promise<BudgetDraftJob> {
+  const items = (adviceItems || [])
+    .filter((it) => it.selected !== false)
+    .map((it) => ({
+      row: it.row,
+      reference_amount: it.reference_amount,
+      budget_amount: it.budget_amount,
+      has_last_year: it.has_last_year,
+      last_year_actual: it.last_year_actual,
+      selected: true,
+      write_last_year: false,
+      subject: it.subject,
+      expense_name: it.expense_name,
+      invoice_name: it.invoice_name,
+      reason: it.reason,
+    }));
+  return request("/api/export/budget/draft/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ advice_items: items }),
+  });
+}
+
+export async function fetchBudgetDraft(jobId: string): Promise<BudgetDraftJob> {
+  return request(`/api/export/budget/draft/jobs/${jobId}`);
+}
+
+export async function getMonthlyState(): Promise<MonthlyState> {
+  return request("/api/export/budget/monthly/state");
+}
+
+export async function genMonthlyQuestions(): Promise<{
+  questions: MonthlyQuestion[];
+  source: "ai" | "rule" | string;
+}> {
+  return request("/api/export/budget/monthly/questions", { method: "POST" });
+}
+
+export async function submitMonthlyAnswers(
+  answers: { id: string; value: string }[],
+): Promise<{ answers: { id: string; value: string }[]; stage: string }> {
+  return request("/api/export/budget/monthly/answers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answers }),
+  });
+}
+
+export async function startMonthlySplit(): Promise<MonthlySplitJob> {
+  return request("/api/export/budget/monthly/split/jobs", { method: "POST" });
+}
+
+export async function fetchMonthlySplitJob(jobId: string): Promise<MonthlySplitJob> {
+  return request(`/api/export/budget/monthly/split/jobs/${jobId}`);
+}
+
+export async function fetchMonthlyResult(): Promise<MonthlySplitResult> {
+  return request("/api/export/budget/monthly");
+}
+
+/** 轮询拆分任务直到终态（不触发下载）。 */
+export async function pollMonthlySplit(
+  onProgress?: (job: MonthlySplitJob) => void,
+): Promise<MonthlySplitJob> {
+  let job = await startMonthlySplit();
+  onProgress?.(job);
+  const deadline = Date.now() + 3 * 60 * 1000;
+  while (Date.now() < deadline) {
+    if (job.status === "completed" || job.status === "failed") return job;
+    await new Promise((r) => setTimeout(r, 1000));
+    job = await fetchMonthlySplitJob(job.job_id);
+    onProgress?.(job);
+  }
+  throw new Error("月度拆分超时，请重试");
+}
+
+/** 下载含月度拆分的最终文件（stage=ready 时可用）。 */
+export async function downloadMonthlyBudget(): Promise<void> {
+  const res = await fetch("/api/export/budget/monthly/download");
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") || "";
+  triggerBlobDownload(blob, filenameFromDisposition(cd, "费用预算三表（含月度拆分）.xlsx"));
+}

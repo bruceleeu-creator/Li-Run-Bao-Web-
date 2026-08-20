@@ -59,7 +59,11 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: ".venv/bin/python -m web_backend.CO_run_WB-CO-TR-20260805160732",
+      // Windows 主机用 Scripts/，macOS/Linux 用 bin/（v26.1 迁移补点）
+      command:
+        process.platform === "win32"
+          ? ".venv\\Scripts\\python -m web_backend.CO_run_WB-CO-TR-20260805160732"
+          : ".venv/bin/python -m web_backend.CO_run_WB-CO-TR-20260805160732",
       url: "http://127.0.0.1:8765/api/health",
       reuseExistingServer: false,
       cwd: "..",
