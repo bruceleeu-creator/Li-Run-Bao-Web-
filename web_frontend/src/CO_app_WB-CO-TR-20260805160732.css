@@ -2473,3 +2473,20 @@ select.input {
   font-weight: 700;
   color: var(--ink);
 }
+
+/* ── 协同看板嵌入（2026-08-20）：iframe 视窗 = 内容区余高，纸墨发丝边框 ── */
+.board-frame {
+  margin-top: 12px;
+  border: 1px solid var(--rule-strong);
+  background: var(--sheet);
+  height: calc(100vh - 216px);
+  min-height: 620px;
+}
+
+.board-frame__iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--sheet);
+}

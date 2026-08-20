@@ -123,7 +123,7 @@
 
 配置 OpenAI 兼容接口（默认 DeepSeek）后启用：扫描件 PDF 解析、AI 整理（整理完成自动导入）、跨年合并报告（逐页分段提取 + 确定性校验，防截断）、指标识别、诊断增强、月度拆分出题与权重（失败回退规则）。**未配置或调用失败时静默回退规则引擎，主流程永不阻塞**。API Key 持久化于本机 `.ai_config.json`（已 gitignore），仅内存持有。
 
-### 3.8 协同任务看板（云端 · 部署中）
+### 3.8 协同任务看板（云端 · 已部署）
 
 预算方案落地后的团队执行跟踪——独立云端服务（`collab_board/`），与本地端财务分析互不依赖；云端只存任务与进度数据，**请勿在任务中粘贴财报原始数字**：
 
@@ -133,7 +133,8 @@
 - **总列表视图**：单页看清整体完成度（总数 / 已完成 / 进行中 / 逾期 / 各成员完成数），支持按负责人、状态、月份筛选——「所有人同时看得见数据和完成度」的落点；房间顶部常驻完成率 / 逾期 / 今日到期
 - **跟踪进度表**：独立 Excel 模板可离线批量填写后导入（逐行反馈成功/跳过与原因），看板可一键导出同结构文件供汇报留档（删两列导出专刊后可原样导回）
 - **移动端**：手机浏览器响应式可用，老板随时抽查看板与完成情况
-- 访问地址：**部署完成后回填**（腾讯云轻量服务器；v1 公网 IP:8080 直连过渡，正式形态域名 + HTTPS）
+- **利润宝内嵌入口（2026-08-20）**：利润宝侧栏新增「协同看板」板块（线上版与本地版均有），点击即在页面内嵌打开本看板（iframe 指向下方地址，账号与利润宝本地互相独立，注册即可体验）
+- 访问地址：**http://49.232.160.7:8081**（腾讯云轻量服务器 OpenCloudOS 9.4 + Docker Compose；宿主机 8080 已被 nginx 占用 → 应用监听 8081，控制台防火墙已放行；正式形态域名 + HTTPS 待接入）
 
 ---
 
@@ -253,6 +254,48 @@ BOARD_TEST_DATABASE_URL=postgresql://board@127.0.0.1:54329/board_test \
   .venv/Scripts/python -m pytest collab_board/board_backend/tests_board -q
 cd collab_board/board_frontend && npm run build && npx playwright test && cd ../..
 ```
+
+### 5.8 服务器线上部署与更新指南（2026-08-20）
+
+利润宝支持**线上版**：整站部署到腾讯云轻量服务器（OpenCloudOS 9.4 + Docker Compose），前端「协同看板」板块即嵌入的云端看板服务。线上版分两个独立服务：
+
+| 服务 | 目录 | 容器端口 | 宿主端口 | 外网地址 | 数据 |
+|------|------|---------|---------|---------|------|
+| 利润宝主应用（本仓库） | `/www/wwwroot/lirunbao` | 8765 | **8082** | http://49.232.160.7:8082 | SQLite+上传+导出在 `lirunbao_workspaces` 卷，AI 配置在 `lirunbao_ai` 卷 |
+| 协同任务看板 | `/www/wwwroot/collab_board` | 8080 | **8081** | http://49.232.160.7:8081 | PostgreSQL 16 卷 `board_pgdata` |
+
+> 端口约定：8080 被宿主宝塔 nginx 占用、8081 看板、8082 主应用（均已放行）；**新增端口需在腾讯云控制台防火墙放行**（自定义 / TCP / 端口 / 0.0.0.0/0 / 允许）。
+
+**一键更新（主应用或看板通用流程）**：
+
+```bash
+# 1) 本机准备：构建前端产物（主应用改动时；dist 已含「协同看板」板块入口）
+cd web_frontend && npm run build && cd ..
+# 2) 打包（只含代码，自动排除用户数据/缓存；看板则打 collab_board/）
+tar --force-local -czf lirunbao.tar.gz -C <项目根> --exclude="__pycache__" --exclude="*.pyc" \
+    --exclude=".mimosa" --exclude=".pytest_cache" --exclude="web_backend/workspaces" \
+    Dockerfile docker-compose.yml requirements.txt web_backend core data demo_output/cases web_frontend/dist
+# 3) 上传并解压（SSH 密钥：~/.ssh/lrb_board，root@49.232.160.7）
+scp -i ~/.ssh/lrb_board lirunbao.tar.gz root@49.232.160.7:/tmp/
+ssh -i ~/.ssh/lrb_board root@49.232.160.7 'tar -xzf /tmp/lirunbao.tar.gz -C /www/wwwroot/lirunbao'
+# 4) 重建并滚动重启（秒级中断；长构建必须 nohup 分离，见注意事项）
+ssh -i ~/.ssh/lrb_board root@49.232.160.7 \
+  'cd /www/wwwroot/lirunbao && nohup docker compose up -d --build > /tmp/lirunbao_build.log 2>&1 < /dev/null &'
+# 5) 验证：外网 health 200 + 页面可开
+curl http://49.232.160.7:8082/api/health   # 主应用 → {"status":"ok","bind":"0.0.0.0"}
+curl http://49.232.160.7:8081/api/health   # 看板 → {"status":"ok","db":true,"env":"prod"}
+```
+
+**看板更新**：打包 `collab_board/` 到 `/www/wwwroot/collab_board`，`docker compose up -d --build`（同流程，镜像名 `collab_board-app`）。**回滚**：`docker images` 找上一镜像标签 → `docker compose up -d` 指回旧标签（或 `git revert` 后重建）。**数据备份**：每日 03:00 crontab 自动 `pg_dump`（看板，留 7 份 `/www/backup/board-db-*.dump`）；主应用 SQLite 卷建议定期 `docker run --rm -v lirunbao_workspaces:/data -v /www/backup:/backup alpine tar -czf /backup/lirunbao-data-$(date +%F).tar.gz /data`。
+
+**线上注意事项（踩坑实录）**：
+
+- **腾讯云 SSH 网关会掐断长会话**：超过几分钟的构建/大任务必须 `nohup ... > /tmp/xxx.log 2>&1 &` 分离执行，再轮询日志；前台跑必被断连
+- **apt/pip 必须走腾讯云镜像**（Dockerfile 已内置）：服务器直连 deb.debian.org / PyPI 极慢（apt 曾卡 10+ 分钟）；`pip` 已指定 `mirrors.cloud.tencent.com/pypi`，`apt` 已 sed 替换 sources
+- **端口被占**：`docker compose up` 报 `address already in use` 时旧容器会卡 `Restarting`，先 `docker rm -f <容器名>` 再 up；容器名可能带 hash 前缀，用 `docker ps` 确认
+- **改代码后镜像层缓存**：只改应用代码（COPY 层）时重建约 1 分钟；改 requirements 才重跑 pip（约 2 分钟，镜像源）
+- **容器重启策略**：db/app 均 `unless-stopped`，服务器重启自动拉起
+- **安全**：云端不存放任何财报原始数据（财报只在本机处理）；看板只存任务/进度；`.env` 与 AI 配置均 chmod 600 且不入镜像
 
 ---
 

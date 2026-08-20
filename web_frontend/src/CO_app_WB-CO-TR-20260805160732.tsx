@@ -247,7 +247,11 @@ const NAV_ITEMS: readonly { key: Workspace; label: string; group: string }[] = [
   { key: "interaction", label: "互动", group: "工作区" },
   { key: "export", label: "第二稿与导出", group: "工作区" },
   { key: "settings", label: "设置", group: "系统" },
+  { key: "board", label: "协同看板", group: "协同" },
 ];
+
+/** 云端协同任务看板地址（独立服务，利润宝内嵌访问入口） */
+const BOARD_URL = "http://49.232.160.7:8081";
 
 /** ① 经营分析报告：Word/PDF 是同一份内容，先生成 DeepSeek 分析再导出 */
 const ANALYSIS_EXPORT_ITEMS: readonly ExportDeliverable[] = [
@@ -360,7 +364,7 @@ function Sidebar({
   current: Workspace;
   onNavigate: (w: Workspace) => void;
 }) {
-  const groups = ["工作区", "系统"] as const;
+  const groups = ["工作区", "系统", "协同"] as const;
   return (
     <aside className="sidebar">
       <div className="sidebar__brand">
@@ -3101,6 +3105,31 @@ function SettingsPage({
   );
 }
 
+/** 协同看板：云端团队任务看板嵌入页（iframe；账号与利润宝本地互相独立） */
+function BoardPage() {
+  return (
+    <section className="panel">
+      <h2 className="panel__title">协同看板</h2>
+      <div className="mini-panel">
+        <p className="mini-panel__row">
+          云端团队任务看板：老板建房邀请码拉员工，全员在同一块看板创建 / 认领 / 推进任务，变更 ≤5 秒同步；总列表监督完成度与逾期，移动端响应式可用。
+        </p>
+        <p className="mini-panel__row">
+          首次使用请在下方看板中注册账号（与利润宝本地账号相互独立；看板只存任务与进度，请勿粘贴财报原始数字）。
+        </p>
+      </div>
+      <div className="board-frame">
+        <iframe
+          title="协同任务看板"
+          src={BOARD_URL}
+          className="board-frame__iframe"
+          allowFullScreen
+        />
+      </div>
+    </section>
+  );
+}
+
 // ── 应用外壳 ──────────────────────────────────────────────────────────
 
 export function App() {
@@ -3459,6 +3488,8 @@ export function App() {
         return <ExportPage session={session} unlocked={exportUnlocked} />;
       case "settings":
         return <SettingsPage aiConfigured={aiConfigured} aiConfig={aiConfig} aiBusy={aiCfgBusy} aiError={aiCfgError} onSaveAIConfig={(cfg) => void handleSaveAIConfig(cfg)} onClearAIConfig={() => void handleClearAIConfig()} />;
+      case "board":
+        return <BoardPage />;
     }
   };
 

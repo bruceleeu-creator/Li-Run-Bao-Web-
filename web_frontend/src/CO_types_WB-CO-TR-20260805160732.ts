@@ -3,12 +3,14 @@
 /**
  * 工作区页面枚举，防止导航与后续 API 路由漂移。
  * 2026-08-18 合并：总览 + 财报导入 → 「导入财报」(overview)；模板工作台 (budget) 移除。
+ * 2026-08-20 新增：协同看板 (board) = 云端团队任务看板 iframe 嵌入入口。
  */
 export type Workspace =
   | "overview"
   | "diagnosis"
   | "interaction"
   | "export"
+  | "board"
   | "settings";
 
 /** 导入历史卡片条目（GET /api/import/history） */

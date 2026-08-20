@@ -1,9 +1,11 @@
-"""利润宝 · Web 启动器（仅本机回环）。
+"""利润宝 · Web 启动器。
 
-启动 uvicorn 于 127.0.0.1，并通过 web_frontend/dist 提供静态前端。
+默认仅绑定本机回环 127.0.0.1:8765；容器/服务器部署通过环境变量
+LRB_HOST / LRB_PORT 覆盖绑定地址与端口（Docker compose 内设 0.0.0.0）。
 """
 
 import importlib
+import os
 from pathlib import Path
 
 from fastapi.staticfiles import StaticFiles
@@ -18,8 +20,11 @@ DEFAULT_PORT = 8765
 
 
 def server_settings() -> dict[str, str]:
-    """回环绑定声明，供验收测试断言使用。"""
-    return {"host": "127.0.0.1", "port": DEFAULT_PORT}
+    """绑定声明（默认 127.0.0.1 回环；LRB_HOST/LRB_PORT 可覆盖，供验收测试断言）。"""
+    return {
+        "host": os.environ.get("LRB_HOST", "127.0.0.1"),
+        "port": int(os.environ.get("LRB_PORT", DEFAULT_PORT)),
+    }
 
 
 def mount_static(app) -> None:

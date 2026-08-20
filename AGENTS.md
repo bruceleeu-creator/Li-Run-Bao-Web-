@@ -1,5 +1,6 @@
 # 利润宝 · 项目记忆（AGENTS.md）
 
+> 更新：2026-08-20 v28 | **P6 云端部署完成 + 整站上线 + 协同看板板块嵌入**：利润宝主应用 Docker 化上线（`/www/wwwroot/lirunbao`，宿主 8082→容器 8765，SQLite/上传/导出/AI 配置全卷持久化，腾讯云镜像源构建约 2 分钟）；前端新增「协同看板」侧栏板块（iframe 嵌入 http://49.232.160.7:8081，e2e 36→37 全绿）；看板部署于 8081（8080 被宿主 nginx 占用）；**8082 已由 owner 放行，线上版 http://49.232.160.7:8082 外网全链路验证通过**（health/样例导入/会话/诊断/看板板块 iframe）；服务器线上更新指南已写入 README 5.8 + 本文件；P7 双设备联调待续，P8 剩删 specs+终验
 > 更新：2026-08-20 v27 | v1.4 双功能主体落地：①预算月度拆分二段式（P1~P3：引擎/状态机/11 端点/月度 Sheet/四步向导，37 测 + e2e 36/36）②协同任务看板 collab_board/（P4~P5：独立服务+SPA+Docker 三件套，20 测+板端 e2e 全绿）；P6 部署预备完成（Dockerfile PYTHONPATH 致命修复+生产形态冒烟+SSH 密钥+部署包）；**P6 部署/P7 联调待 owner 配合（IP+防火墙+公钥），P8 剩删除 specs+终验**；AGENTS/README 已提前规整——续作清单见「版本历史 v1.4.0 执行日志」
 > 更新：2026-08-20 v26.1 | Windows 主机迁移 git 仓库：克隆最新 main 后移植本地未推送改进——OCR rapidocr 3.x（parser.normalize_ocr_result 归一 + 共享引擎 + models/ 高精度模型自动启用 + CO_full_pdf_reader 216DPI 低置信度重扫 + CO_financial_scan y_tolerance 自适应）、Windows 兼容（CO_ai_report_job fcntl→msvcrt 锁抽象、测试子进程平台分支、guardian 路径正斜杠归一）；requirements 由 rapidocr_onnxruntime 迁移 rapidocr>=3.9（支持 Python 3.13）
 > 更新：2026-08-19 v26 | 前端去 AI 味视觉重设计（纸墨台账：暖纸底+墨色+靛墨强调+宋体标题，CSS 全量重写，DOM/类名/文案契约不变，e2e 34 全绿；顺手修复 v25 遗留过期断言 diagnosis_flow:78「导出 Word 报告」→现行两段式导出卡）；v25 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」；v24 数字质检引擎 + 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源） 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」（onSummarize 在 selectedFiles 为空〔如「已保存预览」〕时静默跳过自动导入 → 改为明确警告 + 按钮文案如实 + 选新文件重置状态）；UI 名称统一「经营分析报告」，README 交付物/闭环/3.6 导出交付小节同步重写；v24 数字质检引擎（core/numeric_audit 双层防护）+ 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源）
@@ -13,25 +14,26 @@
 - 数据口径：金额单位默认元；增值税税负率为估算值；小微/高新优惠判定为简化规则，正式申报以税务口径为准
 
 ## 版本与发布状态
-- 当前版本：**v1.4.0**（2026-08-20 预算月度拆分+协同任务看板；本地闭环全绿，云端部署/联调 P6~P7 进行中）；v1.2.0 诊断闭环（2026-08-09）；v1.0.0 MVP（2026-07-26，CO T8 Gate 8 签字通过）
+- 当前版本：**v1.4.0**（2026-08-20 预算月度拆分+协同任务看板；本地闭环全绿，**P6 云端部署完成**（整站 http://49.232.160.7:8082 + 看板 8081），P7 联调待续）；v1.2.0 诊断闭环（2026-08-09）；v1.0.0 MVP（2026-07-26，CO T8 Gate 8 签字通过）
 - 适用平台：macOS 12+ / Windows 10+ / Python 3.11+（rapidocr>=3.9 支持 3.13；本机现为 Windows 10 + .venv\Scripts\python）
 - 分发方式：GitHub 私有仓库（不开源，无 LICENSE）
 - Tk 桌面端已于 2026-08 移除（`gui.py`/`main.py`/Tk 测试删除），**Web 为唯一入口**
 
 ## 版本历史
 
-### v1.4.0 - 2026-08-20 · 预算月度拆分二段式 + 协同任务看板（本地全绿；云端部署/联调 P6~P7 待续）
+### v1.4.0 - 2026-08-20 · 预算月度拆分二段式 + 协同任务看板（本地全绿；**P6 云端部署完成，P7 联调待续**）
 
 **执行日志与续作清单（新会话从本节恢复，无需其他上下文）**：
 - 已完成 P0~P5 + P6 预备，四提交均在远端 main：`4715e1a`（v26.1 基线）→ `6dd4dcd`（specs 执行期文档）→ `7419d8f`（P1~P5 主体 52 文件）→ `3063157`（P6 预备）；均经路径 C REST 直推（Mimosa 拦 2026-08-19 已分诊的 8 项既有 high，owner 经 spec 计划确认授权）
 - 测试基线：模块 A 37 pytest（引擎 20+API 13+Excel 4）+ e2e 36/36（基线 34+新增月度向导 2）；模块 B tests_board 20/20 三轮连跑 + 板端 e2e 全绿；guardian 0 错误；全量回归仅本文件「e2e 夹具说明」节记录的既有遗留失败
-- **待续 P6（代码侧全就绪，等 owner 三件事：公网 IP + 控制台防火墙放行「自定义/TCP/8080/0.0.0.0/0/允许」+ OrcaTerm root 执行加公钥命令）**。SSH 密钥已生成 `~/.ssh/lrb_board`；公钥：`ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEzBt0C6gKOftVgEwoaFuHb7cKDborjhzBrPNwny9WL7 lrb-board-deploy`。部署包 `C:\Users\Administrator\tools\lrb_board_deploy\collab_board.tar.gz`（含 dist 与修复版 Dockerfile，sha256 前 16 位 3162779ae3d1800a）。服务器步骤=密钥登录验证→`ss -tlnp`/`docker ps` 侦察（8080 被占全改 8081+，绝不抢占）→apt 装 Docker+Compose 插件→解包 `/www/wwwroot/collab_board`→`cp .env.example .env` 填 BOARD_DB_PASSWORD/JWT_SECRET 两个随机串（chmod 600）→`docker compose up -d --build`→外网 `GET /api/health` 200→注册冒烟账号建房建任务后 SQL 清理→`crontab: 0 3 * * * /www/wwwroot/collab_board/deploy/backup.sh`；更新=`docker compose build app && docker compose up -d app`（秒级中断），回滚=上一镜像标签重新 up
+- **P6 已完成（2026-08-20 晚间部署）**：公网 `49.232.160.7`（腾讯云轻量 OpenCloudOS 9.4，Docker 28.0.1 + Compose 2.32.1 已预装）。**8080 被宿主 nginx 占用（宝塔面板环境）→ 按预案改 8081**：compose 端口映射改 `"8081:8080"`，外网地址 **http://49.232.160.7:8081**（控制台防火墙 8081 已放行，外网 health 200 实测）。部署要点记录：①SSH 经腾讯云网关（up.yd.qcloud.com），**长会话会被网关掐断**——长时间构建必须 `nohup ... > /tmp/collab_build.log 2>&1 &` 分离执行后轮询日志；②服务器→PyPI 网络慢（约 30KB/s），首次 pip install 约 20 分钟，后续有 build cache 无需重装；③`docker compose up` 端口冲突时旧容器卡 Restarting，需先 `docker rm -f` 再 up；④镜像 `collab_board-app:latest` 191MB，db/app 均 `unless-stopped`，db 仅内网；⑤冒烟全链路通过（注册→建房 invite_code→建任务→done→看板 version 递增→stats 完成度 100%→SPA 首页 200）后 SQL 清理归零；⑥备份 crontab `0 3 * * * /www/wwwroot/collab_board/deploy/backup.sh` 已装（保留既有条目），首份 `board-db-2026-08-20.dump` 已生成。SSH 密钥 `~/.ssh/lrb_board` + 公钥 `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEzBt0C6gKOftVgEwoaFuHb7cKDborjhzBrPNwny9WL7 lrb-board-deploy`；部署包 `C:\Users\Administrator\tools\lrb_board_deploy\collab_board.tar.gz`（sha256 前 16 位 3162779ae3d1800a）。运维：更新=`docker compose build app && docker compose up -d app`（秒级中断，长构建用 nohup），回滚=上一镜像标签重新 up
+- **整站上线 + 协同看板板块（2026-08-20 晚间，owner 要求嵌入）**：①主应用 Docker 化（根目录 `Dockerfile`+`docker-compose.yml`，`/www/wwwroot/lirunbao`，宿主 8082→容器 8765；`CO_run`/`CO_app` 加 `LRB_HOST/LRB_PORT` env（默认 127.0.0.1:8765 不变，测试断言兼容）；卷 `lirunbao_workspaces`（SQLite+上传+导出）与 `lirunbao_ai`（AI 配置）；**apt/pip 必须走腾讯云镜像**（Dockerfile 内置，直连官方源 apt 卡 10+ 分钟）；`data/`（样例导入）与 `core/`、`demo_output/cases/` 必须入镜像（缺 data → `/api/import/sample` 500，踩过）；服务器核心链路冒烟通过（sample 导入→session→诊断）；**8082 已由 owner 放行（2026-08-20 晚间），外网全链路验证通过**（health 200 / 样例导入→会话→诊断 8 条 / 页面「协同看板」板块 iframe 指向 8081 实测 OK）。②前端新增「协同看板」板块：`Workspace` 加 `board`、NAV_ITEMS 加「协同」组、`BoardPage`（iframe 嵌 `BOARD_URL=http://49.232.160.7:8081`）、CSS `.board-frame`（视窗余高）；e2e 新增 `board_entry.spec.ts`（导航→iframe src 断言）→ **36/37 全绿**；本地 8765 已用新代码重启。③README 5.8「服务器线上部署与更新指南」（一键更新/回滚/备份/踩坑清单）+ 3.8 嵌入说明；AGENTS 本文件 v28 同步
 - **待续 P7**：13 步双设备联调剧本（表格在 `specs/monthly-split-collab-board/tasks.md` P7 节；桌面执行文档同步）；归档物存 `demo_output/联调记录_WB-CO-TR-20260820/`
 - **待续 P8**：AGENTS/README 本次（v27）已提前规整；剩 P7 归档后删除 `specs/monthly-split-collab-board/` 整目录 + 全量门禁 + 最终推送（v22 先例）
 - 本机测试基建（Windows）：便携 PostgreSQL 16.9 解压版 `C:\Users\Administrator\tools\pgsql16`（端口 54329、trust 仅本机、库 board_test/board_e2e；启停 `pgsql16\bin\pg_ctl.exe -D C:\Users\Administrator\tools\pgdata-test -l C:\Users\Administrator\tools\pg-test.log start|stop -o "-p 54329"`）；板端测试 `BOARD_TEST_DATABASE_URL=postgresql://board@127.0.0.1:54329/board_test .venv/Scripts/python -m pytest collab_board/board_backend/tests_board -q`；板端 e2e `cd collab_board/board_frontend && npx playwright test`（webServer 自动起 8090 后端+5174 vite）
 - 开发中修复的四个真实 bug：①monthly 迟到 watcher 把 ready 回写成 draft（→stage 单向守卫）②勾选指纹重置后旧任务结果回写（→draft_job_id 守卫）③板端在 `db.conn()` 块外复用已归还连接查询 → 服务端 idle-in-transaction 持锁、全量测试挂死 605 秒（→同事务内取映射+lock_timeout 诊断）④Content-Disposition 中文文件名 latin-1 崩溃（→RFC 5987）
 - Windows 环境修复：主项目 playwright.config webServer 补 win32 Scripts/ 分支；`npx playwright install chromium`（本机已装）；folder_import/identify_auto 两用例中文临时目录致 headless-shell 崩溃（0xC0000409）改 ASCII 前缀；板端 vite 显式绑 127.0.0.1
-- 功能要点：模块 A——导出页②段四步向导（生成预算第一稿不下载→自动二轮问答〔AI 出题回退规则题库〕→拆分〔AI 权重→引擎算金额→恒等校验〕→导出含「月度执行计划」Sheet）+「跳过拆分导出旧版」逃生口；架构见「月度拆分引擎」专节。模块 B——`collab_board/` 独立云端服务（FastAPI+PostgreSQL 16 Docker Compose；一人一账户/老板建房邀请码拉员工/滴答清单式三列看板+总列表/创建人颜色/5 秒轮询/跟踪进度表模板往返/老板完成度监督/移动端响应式）；架构见「协同看板服务」专节；README「协同任务看板」小节访问地址待 P6 后回填
+- 功能要点：模块 A——导出页②段四步向导（生成预算第一稿不下载→自动二轮问答〔AI 出题回退规则题库〕→拆分〔AI 权重→引擎算金额→恒等校验〕→导出含「月度执行计划」Sheet）+「跳过拆分导出旧版」逃生口；架构见「月度拆分引擎」专节。模块 B——`collab_board/` 独立云端服务（FastAPI+PostgreSQL 16 Docker Compose；一人一账户/老板建房邀请码拉员工/滴答清单式三列看板+总列表/创建人颜色/5 秒轮询/跟踪进度表模板往返/老板完成度监督/移动端响应式）；架构见「协同看板服务」专节；README「协同任务看板」访问地址已回填 **http://49.232.160.7:8081**
 
 ### v1.3.0 - 2026-08-18 · 工作区重构 + 完整案例载入 + 数字质检
 - **工作区重构**：总览+财报导入合并为「导入财报」单页（主列：经营概况→数字质检→导入区→AI 合并报告；右栏：导入记录卡片+报告记录）；模板工作台(budget)前端移除（预算功能保留在导出页）；「一键补全互动并解锁」「载入示例数据」按钮删除；流程条精简为编号圆点
@@ -205,7 +207,7 @@
 - **检查脚本**：`环境检查`（退出码 0 通过/1 警告/2 阻断）、`质量检查`（pytest 全量 + make_sample + /api/health + guardian --quick + check.sh）
 - **故障排查**：① Gatekeeper 拦 .command → 右键打开；② 找不到 Python 3.11+ → `brew install python@3.12` 或 `export LRB_PYTHON=...`；③ 缺前端产物 → `cd web_frontend && npm install && npm run build`；④ 扫描件提示配 AI → 设置页填 Base URL/模型/Key；⑤ 真实模板验收 → `export LRB_REAL_TEMPLATE_PATH=...` 跑 test_t7_acceptance（未设自动跳过）
 - **发布**：历史 v1.0.0 用「构建发布包」脚本产出 release/+ZIP+SHA-256 并扫敏感字符串（该脚本现不在 scripts/，需发布时重建）；发布包排除 .git/.venv/缓存/AI 配置/过程文件
-- **协同看板云端部署（2026-08-20 P6 预备完成，执行待 owner）**：腾讯云轻量服务器 Docker Compose（db 仅内网+数据卷 / app 0.0.0.0:8080）；**轻量云两个特性坑：防火墙在腾讯云控制台而非服务器内；无域名拿不到 HTTPS 证书**（v1 IP:8080 明文过渡，缓解=登录限流+来源 IP 白名单；域名期启用 nginx/board.conf 443 反代+80 跳转，应用零改码）；完整续作步骤/部署包/SSH 公钥见「版本历史 v1.4.0 执行日志」
+- **线上部署（2026-08-20 完成）**：腾讯云轻量 49.232.160.7（OpenCloudOS 9.4，Docker 28 + Compose 2.32 预装）。两服务：看板 `/www/wwwroot/collab_board`（8081，db 仅内网+数据卷，部署/运维要点见执行日志 P6 块）；主应用 `/www/wwwroot/lirunbao`（8082，卷持久化，构建要点见执行日志「整站上线」块）。**更新指南 = README 5.8**（一键更新/回滚/备份/踩坑）。**轻量云两个特性坑：防火墙在腾讯云控制台而非服务器内（新端口必须控制台放行，8082 已放行）；无域名拿不到 HTTPS 证书**（v1 IP:PORT 明文过渡，缓解=登录限流+来源 IP 白名单；域名期启用 nginx/board.conf 443 反代+80 跳转，应用零改码）；SSH 经腾讯云网关会掐断长会话→构建一律 nohup 分离
 - **GitHub 仓库（2026-08-18 起推送）**：`origin=https://github.com/bruceleeu-creator/Li-Run-Bao-Web-.git`（gh CLI 已登录 bruceleeu-creator，main 直推）；推送流程=guardian --quick → `git add -A && git commit && git push origin main`（缓存目录均被 .gitignore 忽略、不会入暂存，无需删除；详见下方「GitHub 推送教程」）；`.ai_config.json`（API Key）/运行时 DB（根目录与 workspaces 的 app.db）/workspaces 用户上传文件均被 .gitignore 挡住，仅放行三个 e2e 夹具 xlsx；根目录误生成的空 `app.db` 2026-08-18 已补 ignore
 - **推送策略与 Mimosa Git 门（2026-08-19 定案，owner 授权）**：ZCode 内 Mimosa 插件会在 `git commit/push` 前跑 L3 深扫并对 high 强制拦截（`--no-verify` 无效，钩子在命令执行前拦截；Bash 直接写项目源文件同样会被「写源旁路」门拦下，改文件须走 Edit/Write 工具）。2026-08-19 对 8 项 high 的分诊结论（全部为既有代码、已在远端）：`CO_import:89` 已做 `rsplit("/",1)[-1]` 文件名净化（该代码本身即防穿越缓解）；`CO_ai:115` 写入服务端 env 指定的配置路径非用户输入；tests 两处「硬编码凭据」为显式假密钥夹具（夹具名自带 not-real 标记、非真实密钥 / 指向 127.0.0.1:39999 死端口测失败路径；指令文件不引用凭据样字面量，原件只在测试代码内）；`test_parser:172`/`make_sample:74` 为 pytest tmp_path 与固定样例路径；`ai_engine:155` 与 `CO_deepseek_parse:116` 的「SSRF」为本机用户自配 AI 端点的设计内行为（PRD F9 可选增强、服务仅绑 127.0.0.1、无外部可控输入；若拒绝环回/私网反而破坏本地网关用法与 test_interactive 失败路径测试）。**后续推送三选一**：① 修复/消除对应 finding 后按钩子要求重扫再推；② 启动 ZCode 前设 `MIMOSA_GIT_GATE_MODE=warn`（high 只提示不拦）或 `MIMOSA_NO_GIT_GATE=1`（关 Git 门）；③ 在终端直接 `git commit && git push`（终端不经 ZCode 钩子，仍会过 `.hooks/pre-commit` 项目守护）。v26 视觉重设计提交系经 owner 明示授权，用 `gh api`（REST：trees→commits→update ref）直推 + 本地 `git fetch && git reset origin/main` 对齐完成，未改动钩子/插件/扫描状态
 - **git 代理坑**：本机 git 配了 `http.proxy=127.0.0.1:7890`（Clash 类），代理未运行时 push 报 `Failed to connect to 127.0.0.1 port 7890`——绕过：`git -c http.proxy= -c https.proxy= push origin main`；或先启动代理再常规 push
@@ -340,8 +342,10 @@ token，再用 python urllib 走同一「trees→commits→PATCH refs」流程�
 | 导入历史/完整载入 | `CO_db.import_history` + `CO_import` 载入路由 | ✅ 卡片/报告点击完整恢复案例（财务+诊断+互动+解锁+报告） |
 | 月度拆分引擎 | `core/CO_monthly_split_WB-CO-TR-20260820.py` | ✅ 权重→金额+尾差归位+恒等硬门槛+规则兜底（AI 只出形状）（2026-08-20） |
 | 月度拆分 API/状态机 | `web_backend/CO_monthly_WB-CO-TR-20260820.py` + `CO_db.monthly_budget_state` | ✅ 11 端点：第一稿/问答/拆分/下载 + 惰性补写 + stage 单向守卫；37 测试 |
-| 协同看板服务 | `collab_board/`（board_backend 6 模块 + board_frontend SPA + Docker 三件套） | ✅ 本地全绿（20 测试+e2e）；Lighthouse 部署/联调 P6~P7 待续 |
-| 单元/接口测试 | `tests/` 33 文件 | ✅ 含 e2e 10 spec 36 用例（Playwright）+ 板端 tests_board 20 用例 |
+| 协同看板服务 | `collab_board/`（board_backend 6 模块 + board_frontend SPA + Docker 三件套） | ✅ 本地全绿（20 测试+e2e）；**已部署 http://49.232.160.7:8081**（P6 完成，P7 联调待续） |
+| 利润宝主应用线上版 | 根 `Dockerfile`+`docker-compose.yml`（`/www/wwwroot/lirunbao`，8082→8765，卷持久化） | ✅ 已部署上线，外网 http://49.232.160.7:8082 全链路验证通过（导入→会话→诊断→看板板块） |
+| 协同看板板块 | `web_frontend` `Workspace="board"` + `BoardPage`（iframe 嵌入）+ `board_entry.spec.ts` | ✅ 本地与线上均有入口（e2e 37 全绿） |
+| 单元/接口测试 | `tests/` 33 文件 | ✅ 含 e2e 11 spec 37 用例（Playwright）+ 板端 tests_board 20 用例 |
 
 ## 验收命令（每次提交前必跑，统一用 `.venv/bin/python`）
 ```bash

@@ -5,6 +5,7 @@
 """
 
 import importlib
+import os
 
 from fastapi import FastAPI
 
@@ -30,6 +31,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "bind": "127.0.0.1"}
+        # LRB_HOST 供容器/服务器部署覆盖（默认本机回环）；测试断言默认值不变
+        return {"status": "ok", "bind": os.environ.get("LRB_HOST", "127.0.0.1")}
 
     return app

@@ -1,0 +1,26 @@
+# 利润宝主应用 · 腾讯云轻量服务器单机编排（2026-08-20）
+# 端口占用现状：8080 宿主 nginx / 8081 collab_board / 8082 本应用（控制台防火墙需放行）
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      LRB_HOST: 0.0.0.0
+      LRB_PORT: "8765"
+      # AI 配置落卷（服务器上不随镜像层写入；未配置时规则引擎离线兜底）
+      LIRUNBAO_AI_CONFIG_PATH: /app/ai/.ai_config.json
+    ports:
+      - "8082:8765"
+    volumes:
+      # SQLite（app.db）+ 用户上传文件 + 导出产物全部持久化
+      - lirunbao_workspaces:/app/web_backend/workspaces
+      - lirunbao_ai:/app/ai
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  lirunbao_workspaces:
+  lirunbao_ai:
