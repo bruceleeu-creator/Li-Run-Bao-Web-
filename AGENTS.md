@@ -1,5 +1,6 @@
 # 利润宝 · 项目记忆（AGENTS.md）
 
+> 更新：2026-08-20 v27 | v1.4 双功能主体落地：①预算月度拆分二段式（P1~P3：引擎/状态机/11 端点/月度 Sheet/四步向导，37 测 + e2e 36/36）②协同任务看板 collab_board/（P4~P5：独立服务+SPA+Docker 三件套，20 测+板端 e2e 全绿）；P6 部署预备完成（Dockerfile PYTHONPATH 致命修复+生产形态冒烟+SSH 密钥+部署包）；**P6 部署/P7 联调待 owner 配合（IP+防火墙+公钥），P8 剩删除 specs+终验**；AGENTS/README 已提前规整——续作清单见「版本历史 v1.4.0 执行日志」
 > 更新：2026-08-20 v26.1 | Windows 主机迁移 git 仓库：克隆最新 main 后移植本地未推送改进——OCR rapidocr 3.x（parser.normalize_ocr_result 归一 + 共享引擎 + models/ 高精度模型自动启用 + CO_full_pdf_reader 216DPI 低置信度重扫 + CO_financial_scan y_tolerance 自适应）、Windows 兼容（CO_ai_report_job fcntl→msvcrt 锁抽象、测试子进程平台分支、guardian 路径正斜杠归一）；requirements 由 rapidocr_onnxruntime 迁移 rapidocr>=3.9（支持 Python 3.13）
 > 更新：2026-08-19 v26 | 前端去 AI 味视觉重设计（纸墨台账：暖纸底+墨色+靛墨强调+宋体标题，CSS 全量重写，DOM/类名/文案契约不变，e2e 34 全绿；顺手修复 v25 遗留过期断言 diagnosis_flow:78「导出 Word 报告」→现行两段式导出卡）；v25 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」；v24 数字质检引擎 + 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源） 经营分析报告链路（导出页两段式：①DeepSeek 前世今生分析→Word/PDF 同源导出 + 分割线 + ②费用编制建议→测算模型/预算三表；数字白名单只提示不改数）；修复「AI 整理后未进导入记录」（onSummarize 在 selectedFiles 为空〔如「已保存预览」〕时静默跳过自动导入 → 改为明确警告 + 按钮文案如实 + 选新文件重置状态）；UI 名称统一「经营分析报告」，README 交付物/闭环/3.6 导出交付小节同步重写；v24 数字质检引擎（core/numeric_audit 双层防护）+ 导入记录/报告记录完整案例载入 + AI 整理即导入；v23 工作区重构（合并页/五工作区）；v22 整合全部文档进本文件（唯一文档真源）
 
@@ -12,12 +13,25 @@
 - 数据口径：金额单位默认元；增值税税负率为估算值；小微/高新优惠判定为简化规则，正式申报以税务口径为准
 
 ## 版本与发布状态
-- 当前版本：**v1.2.0**（2026-08-09 诊断闭环）；v1.0.0 MVP（2026-07-26，CO T8 Gate 8 签字通过）
-- 适用平台：macOS 12+ / Python 3.11+（**注意：rapidocr_onnxruntime 需 Python <3.13，推荐 3.11/3.12**）
+- 当前版本：**v1.4.0**（2026-08-20 预算月度拆分+协同任务看板；本地闭环全绿，云端部署/联调 P6~P7 进行中）；v1.2.0 诊断闭环（2026-08-09）；v1.0.0 MVP（2026-07-26，CO T8 Gate 8 签字通过）
+- 适用平台：macOS 12+ / Windows 10+ / Python 3.11+（rapidocr>=3.9 支持 3.13；本机现为 Windows 10 + .venv\Scripts\python）
 - 分发方式：GitHub 私有仓库（不开源，无 LICENSE）
 - Tk 桌面端已于 2026-08 移除（`gui.py`/`main.py`/Tk 测试删除），**Web 为唯一入口**
 
 ## 版本历史
+
+### v1.4.0 - 2026-08-20 · 预算月度拆分二段式 + 协同任务看板（本地全绿；云端部署/联调 P6~P7 待续）
+
+**执行日志与续作清单（新会话从本节恢复，无需其他上下文）**：
+- 已完成 P0~P5 + P6 预备，四提交均在远端 main：`4715e1a`（v26.1 基线）→ `6dd4dcd`（specs 执行期文档）→ `7419d8f`（P1~P5 主体 52 文件）→ `3063157`（P6 预备）；均经路径 C REST 直推（Mimosa 拦 2026-08-19 已分诊的 8 项既有 high，owner 经 spec 计划确认授权）
+- 测试基线：模块 A 37 pytest（引擎 20+API 13+Excel 4）+ e2e 36/36（基线 34+新增月度向导 2）；模块 B tests_board 20/20 三轮连跑 + 板端 e2e 全绿；guardian 0 错误；全量回归仅本文件「e2e 夹具说明」节记录的既有遗留失败
+- **待续 P6（代码侧全就绪，等 owner 三件事：公网 IP + 控制台防火墙放行「自定义/TCP/8080/0.0.0.0/0/允许」+ OrcaTerm root 执行加公钥命令）**。SSH 密钥已生成 `~/.ssh/lrb_board`；公钥：`ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEzBt0C6gKOftVgEwoaFuHb7cKDborjhzBrPNwny9WL7 lrb-board-deploy`。部署包 `C:\Users\Administrator\tools\lrb_board_deploy\collab_board.tar.gz`（含 dist 与修复版 Dockerfile，sha256 前 16 位 3162779ae3d1800a）。服务器步骤=密钥登录验证→`ss -tlnp`/`docker ps` 侦察（8080 被占全改 8081+，绝不抢占）→apt 装 Docker+Compose 插件→解包 `/www/wwwroot/collab_board`→`cp .env.example .env` 填 BOARD_DB_PASSWORD/JWT_SECRET 两个随机串（chmod 600）→`docker compose up -d --build`→外网 `GET /api/health` 200→注册冒烟账号建房建任务后 SQL 清理→`crontab: 0 3 * * * /www/wwwroot/collab_board/deploy/backup.sh`；更新=`docker compose build app && docker compose up -d app`（秒级中断），回滚=上一镜像标签重新 up
+- **待续 P7**：13 步双设备联调剧本（表格在 `specs/monthly-split-collab-board/tasks.md` P7 节；桌面执行文档同步）；归档物存 `demo_output/联调记录_WB-CO-TR-20260820/`
+- **待续 P8**：AGENTS/README 本次（v27）已提前规整；剩 P7 归档后删除 `specs/monthly-split-collab-board/` 整目录 + 全量门禁 + 最终推送（v22 先例）
+- 本机测试基建（Windows）：便携 PostgreSQL 16.9 解压版 `C:\Users\Administrator\tools\pgsql16`（端口 54329、trust 仅本机、库 board_test/board_e2e；启停 `pgsql16\bin\pg_ctl.exe -D C:\Users\Administrator\tools\pgdata-test -l C:\Users\Administrator\tools\pg-test.log start|stop -o "-p 54329"`）；板端测试 `BOARD_TEST_DATABASE_URL=postgresql://board@127.0.0.1:54329/board_test .venv/Scripts/python -m pytest collab_board/board_backend/tests_board -q`；板端 e2e `cd collab_board/board_frontend && npx playwright test`（webServer 自动起 8090 后端+5174 vite）
+- 开发中修复的四个真实 bug：①monthly 迟到 watcher 把 ready 回写成 draft（→stage 单向守卫）②勾选指纹重置后旧任务结果回写（→draft_job_id 守卫）③板端在 `db.conn()` 块外复用已归还连接查询 → 服务端 idle-in-transaction 持锁、全量测试挂死 605 秒（→同事务内取映射+lock_timeout 诊断）④Content-Disposition 中文文件名 latin-1 崩溃（→RFC 5987）
+- Windows 环境修复：主项目 playwright.config webServer 补 win32 Scripts/ 分支；`npx playwright install chromium`（本机已装）；folder_import/identify_auto 两用例中文临时目录致 headless-shell 崩溃（0xC0000409）改 ASCII 前缀；板端 vite 显式绑 127.0.0.1
+- 功能要点：模块 A——导出页②段四步向导（生成预算第一稿不下载→自动二轮问答〔AI 出题回退规则题库〕→拆分〔AI 权重→引擎算金额→恒等校验〕→导出含「月度执行计划」Sheet）+「跳过拆分导出旧版」逃生口；架构见「月度拆分引擎」专节。模块 B——`collab_board/` 独立云端服务（FastAPI+PostgreSQL 16 Docker Compose；一人一账户/老板建房邀请码拉员工/滴答清单式三列看板+总列表/创建人颜色/5 秒轮询/跟踪进度表模板往返/老板完成度监督/移动端响应式）；架构见「协同看板服务」专节；README「协同任务看板」小节访问地址待 P6 后回填
 
 ### v1.3.0 - 2026-08-18 · 工作区重构 + 完整案例载入 + 数字质检
 - **工作区重构**：总览+财报导入合并为「导入财报」单页（主列：经营概况→数字质检→导入区→AI 合并报告；右栏：导入记录卡片+报告记录）；模板工作台(budget)前端移除（预算功能保留在导出页）；「一键补全互动并解锁」「载入示例数据」按钮删除；流程条精简为编号圆点
@@ -93,6 +107,12 @@
 - **模板导入校验**：`read_template` 验证 Sheet 名 + 关键标签 + 84 行结构；A/B/C 列优先读取用户文件维护内容
 - **报告章节完整**：Word/PDF 必含 7 章：经营目标 / 预算汇总 / 超支异常明细 / 84 行明细 / 诊断与优化建议 / 完整计算口径 / 合规声明；诊断建议表必须含负责人/期限/成本节约/税收节约/税负影响/净影响分栏
 - **输入校验**：`validate_plan` 拒绝负金额 / 越界比例（E2/E3 不在 [0,1]）/ 非法税率（E4 不在 {0.05, 0.15, 0.25}）
+- **月度拆分 AI 只出形状（2026-08-20）**：AI 只产出问题集与每行 12 权重（note 禁数字），金额一律 `core/CO_monthly_split` 引擎算（round 到元+尾差归位 argmax 月）；逐行 Σ月=round(annual) 与整表恒等是硬门槛（不过不出结果）；AI 权重须覆盖全部非零行且 Σw∈[0.95,1.05]，失败重试≤3 回退规则；端点 `/api/export/budget/draft/jobs` + `/monthly/{state,questions,answers,split/jobs,,download}`；**旧 `/budget/jobs`+`/download` 保留不动=跳过拆分旧版路径**（e2e「导出测算模型」卡契约不动）
+- **monthly 状态机只进不退（2026-08-20）**：`monthly_budget_state` 每 session_version 一行，stage：draft→questions→answered→splitting→ready（旁路 failed/skipped）；迟到 draft watcher 在 stage 已越过 draft 时必须丢弃（`_finalize_draft` 单向守卫）；勾选指纹（sha256 排序 {row,budget_amount}）变化即整行重置，旧任务结果按 draft_job_id 不匹配丢弃；GET 端点惰性补写快照（`_ensure_draft_finalized`）保证前端见 completed 即有 plan_snapshot（消除轮询竞态）
+- **collab_board 服务边界（2026-08-20）**：独立部署单元，**不 import core/ 与 web_backend/**；云端只存任务/进度数据（财报不上云红线不变）；连字符模块名 → 须以 collab_board 目录为 sys.path 根 + importlib 加载（Dockerfile `WORKDIR /app`+`ENV PYTHONPATH=/app`；曾因 WORKDIR 在包内必崩）
+- **板端 psycopg 连接护栏（2026-08-20）**：`db.conn()` 上下文块外的连接已归还 psycopg_pool，**绝不能再查询**——曾致服务端 idle-in-transaction 持锁、全量测试挂死 605 秒；任务展示映射（含历史创建人 `_users_map`）必须与业务查询同一 with 块内取
+- **板端 HTTP 响应头禁非 latin-1**：中文下载文件名必须 RFC 5987（`filename*=UTF-8''<urlencoded>`），直接拼中文必崩 UnicodeEncodeError
+- **板端测试需本地 PG**：环境变量 `BOARD_TEST_DATABASE_URL` 未设时 conftest 整体跳过（不阻塞主项目门禁）；本机便携 PG 位置与命令见「版本历史 v1.4.0 执行日志」
 
 ## 产品需求基线（原 PRD v1.0 要点）
 - **痛点**：手工分析依赖顾问经验、口径不一；对标缺乏系统化工具易遗漏；建议一次性结论缺乏互动与跟踪；客户对「该有没的/可有可没有」缺乏直观认知
@@ -161,6 +181,22 @@
 - **AI 整理并导入的静默跳过坑（2026-08-18 修复）**：`onSummarize` 原来只在 `selectedFiles.length > 0` 时自动 `runImport`，「查看已保存预览」恢复的 previews 没有原始 File 对象 → 整理成功但**不发 POST /api/import、无提示、无导入记录**（用户以为导入失败）。修复契约：无文件时必须给出明确警告（`aiSkipImportWarn`）+ 按钮文案改为「AI 整理（预览无文件，不会自动导入）」+ 查看已保存预览时显示仅供查看提示条 + onFolderPick/onDrop/runImport 重置警告与 showSavedPreview。「已保存预览」永远不可导入（File 对象已不存在），正确路径=重新选文件（拖入即自动导入）
 - **测试**：`tests/CO_test_report_analysis_WB-CO-TR-20260818.py` 6 例（事实清单结构、合并只改文本不动数字、数字白名单告警、normalize/has_content、无 AI 503、合并叙事注入 Word 模板保留）
 
+### 月度拆分引擎与二段式流程（core/CO_monthly_split + web_backend/CO_monthly，2026-08-20 新增）
+- **数据契约**：`MonthlyRow{row,subject,expense_name,annual,months[12],shape,shape_note}` / `SplitResult{rows,month_totals,grand_total,mode(ai|rule),warnings,checks}`；`plan_snapshot.rows` 来自 `export_budget_3sheet` meta 的 `plan_rows`（与写出 G 列同源；meta 另附 `top_summary`）
+- **数学规则（恒等硬门槛）**：权重归一化 Σ=1（负清零/NaN 拒/全零回退均匀）→ `months[i]=round(annual×w[i])` → 尾差 `annual−Σmonths` 整体加到 argmax(w) 月（100,001=8333×12+5 → 一月 8338）；annual=0 全零；`verify` 逐行+整表，任一失败任务 failed
+- **AI 交互**（`CO_ai.generate_monthly_questions/generate_monthly_weights`，thinking disabled，max_tokens 4096）：题目 4~6 道 single/text 全带默认项，结构非法回退 `build_rule_questions()` 六题规则题库；权重行缺失/非法（负/Σ 偏离>0.05/NaN）→该行回退 uniform 记 warning；note 含数字仅白名单告警不改数
+- **规则兜底形状**：刚性（工资/社保/房租/折旧/利息等）→uniform；年终奖/奖金/提成→peak（春节月权重 N/(12+N)，`spring_festival_month` 按预算年度取 1/2 月）；广宣/推广/营销→front/back_load（旺季窗口 ×1.8）；答案一次性支出（「3月 50万 装修费」解析）→lump 指定月全额（声明金额仅与年度比对告警，不改数）；其余 uniform
+- **Excel 月度 Sheet**：`append_monthly_sheet(xlsx_path, split_payload, out_path, mode)` 在第一稿末尾追加「月度执行计划」——A 行号/B 科目/C 费用项目/D 年度（=快照 annual）/E~P 月金额/Q `=SUM(E:P)` 可复算/R `=Q−D` 全 0（非 0 条件标红）/末两行月度总计+说明；同名 Sheet 重复调用幂等覆盖；`read_template` 对追加天然兼容；纸墨样式（表头加粗+发丝边框）
+- **配套**：`CO_budget_export_job.get_budget_export_full`（完整 meta getter）；`CO_db.upsert/get/delete_monthly_state`；前端 `monthly-wizard` 四步向导（纸墨 CSS），挂载 `GET monthly/state` 恢复、勾选变化警示条；测试三份：引擎 20 / API 13（TestClient 假 AI mock 覆盖成功/缺行回退/409/指纹重置）/ Excel 4
+
+### 协同看板服务（collab_board/，独立部署单元，2026-08-20 新增）
+- **架构**：`board_backend/`（CO_app 应用工厂+静态托管 dist / CO_db psycopg3 连接池+幂等 DDL / CO_auth / CO_rooms / CO_tasks / CO_template）+ `board_frontend/`（Vite+React 三页 SPA）+ Dockerfile + docker-compose.yml（db: postgres:16-alpine 仅内网+数据卷+健康检查；app: 8080 对外）+ nginx/board.conf（域名期）+ deploy/backup.sh（pg_dump 留 7 份）；依赖 `requirements-board.txt`（fastapi/uvicorn/psycopg[binary]/psycopg-pool/bcrypt/pyjwt/openpyxl/python-multipart，均不在禁用清单）
+- **认证**：bcrypt cost 12；JWT HS256 7 天（`JWT_SECRET` env ≥32 位）；登录限流内存桶 10 次/分/IP→429；统一文案「用户名或密码错误」；注册自动分配 8 色板（可 PATCH /me 改）
+- **房间**：邀请码 8 位 Crockford base32（owner 可重置、旧码失效）；`/{rid}/join` 码错 4 次/时锁定；`POST /api/rooms/join-by-code` 凭码找房加入（前端无需预知 rid）；`require_member` 依赖做隔离（非成员一律 403）；owner 可移除成员（不动历史任务，creator 按 users 表快照显示）
+- **任务与同步**：任务写=单事务「改 tasks + rooms.version+=1 + 插 task_events（审计流水）」；`GET /board?version=n` 相同版本返回 `{unchanged:true}` 省流量，前端 5 秒轮询（visibilitychange 暂停）；PATCH 用 `model_fields_set` 只动显式提供字段；status→done 记 completed_at/by；逾期=due<今日且未完成、due_today 同日；`/tasks/batch` ≤200 条（P2 本地端对接预留）；`/stats` 按成员创建/完成/逾期
+- **模板契约**：表头前 8 列严格匹配（A 任务名称*…H 备注），不匹配 400 提示下载官方模板；导入 ≤500 行逐行 `{row,status,reason}`（负责人不存在→待分配、状态/优先级非法→默认值+提示）；导出 +I 创建人/J 完成时间，删 I/J 可原样导回（往返一致）
+- **看板 UI**：登录/房间列表/看板三页；顶栏完成率+逾期+今日到期+成员颜色图例+owner 邀请码与成员管理；看板三列（创建人色条=左缘 3px）+总列表（底部合计）；筛选负责人/状态/月份；移动端三列纵向堆叠；纸墨视觉同主项目
+
 ## Web 化与运维要点
 - **架构**：React+Vite 前端 → FastAPI 后端（`create_app()`，仅监听 `127.0.0.1:8765`，`GET /api/health` 返回 `{"status":"ok","bind":"127.0.0.1"}`）→ 复用 `core/` + SQLite（`app.db`）+ 本地工作区导出
 - **七工作区 → 五工作区（2026-08-18）**：`overview(导入财报，含导入+AI报告+历史卡片) | diagnosis | interaction | export | settings`（防导航与 API 路由漂移）；`Workspace` 类型已收窄（import/budget 已移除）；导入提交按钮名为「开始导入」（避免与导航「导入财报」严格模式冲突）；视觉**纸墨台账**风格（2026-08-19 v26 去 AI 味重设计：暖纸底 oklch(96.6% 0.006 84) + 墨色文字 + 靛墨强调 + Songti SC 衬线标题 + 发丝线面板 + 2/3px 方角；禁深色/霓虹/毛玻璃/胶囊圆角/位移悬浮/进场动画，设计系统锁定于 `web_frontend/design.md`；改动仅 CSS + index.html，DOM/类名/文案契约不动）
@@ -169,6 +205,7 @@
 - **检查脚本**：`环境检查`（退出码 0 通过/1 警告/2 阻断）、`质量检查`（pytest 全量 + make_sample + /api/health + guardian --quick + check.sh）
 - **故障排查**：① Gatekeeper 拦 .command → 右键打开；② 找不到 Python 3.11+ → `brew install python@3.12` 或 `export LRB_PYTHON=...`；③ 缺前端产物 → `cd web_frontend && npm install && npm run build`；④ 扫描件提示配 AI → 设置页填 Base URL/模型/Key；⑤ 真实模板验收 → `export LRB_REAL_TEMPLATE_PATH=...` 跑 test_t7_acceptance（未设自动跳过）
 - **发布**：历史 v1.0.0 用「构建发布包」脚本产出 release/+ZIP+SHA-256 并扫敏感字符串（该脚本现不在 scripts/，需发布时重建）；发布包排除 .git/.venv/缓存/AI 配置/过程文件
+- **协同看板云端部署（2026-08-20 P6 预备完成，执行待 owner）**：腾讯云轻量服务器 Docker Compose（db 仅内网+数据卷 / app 0.0.0.0:8080）；**轻量云两个特性坑：防火墙在腾讯云控制台而非服务器内；无域名拿不到 HTTPS 证书**（v1 IP:8080 明文过渡，缓解=登录限流+来源 IP 白名单；域名期启用 nginx/board.conf 443 反代+80 跳转，应用零改码）；完整续作步骤/部署包/SSH 公钥见「版本历史 v1.4.0 执行日志」
 - **GitHub 仓库（2026-08-18 起推送）**：`origin=https://github.com/bruceleeu-creator/Li-Run-Bao-Web-.git`（gh CLI 已登录 bruceleeu-creator，main 直推）；推送流程=guardian --quick → `git add -A && git commit && git push origin main`（缓存目录均被 .gitignore 忽略、不会入暂存，无需删除；详见下方「GitHub 推送教程」）；`.ai_config.json`（API Key）/运行时 DB（根目录与 workspaces 的 app.db）/workspaces 用户上传文件均被 .gitignore 挡住，仅放行三个 e2e 夹具 xlsx；根目录误生成的空 `app.db` 2026-08-18 已补 ignore
 - **推送策略与 Mimosa Git 门（2026-08-19 定案，owner 授权）**：ZCode 内 Mimosa 插件会在 `git commit/push` 前跑 L3 深扫并对 high 强制拦截（`--no-verify` 无效，钩子在命令执行前拦截；Bash 直接写项目源文件同样会被「写源旁路」门拦下，改文件须走 Edit/Write 工具）。2026-08-19 对 8 项 high 的分诊结论（全部为既有代码、已在远端）：`CO_import:89` 已做 `rsplit("/",1)[-1]` 文件名净化（该代码本身即防穿越缓解）；`CO_ai:115` 写入服务端 env 指定的配置路径非用户输入；tests 两处「硬编码凭据」为显式假密钥夹具（夹具名自带 not-real 标记、非真实密钥 / 指向 127.0.0.1:39999 死端口测失败路径；指令文件不引用凭据样字面量，原件只在测试代码内）；`test_parser:172`/`make_sample:74` 为 pytest tmp_path 与固定样例路径；`ai_engine:155` 与 `CO_deepseek_parse:116` 的「SSRF」为本机用户自配 AI 端点的设计内行为（PRD F9 可选增强、服务仅绑 127.0.0.1、无外部可控输入；若拒绝环回/私网反而破坏本地网关用法与 test_interactive 失败路径测试）。**后续推送三选一**：① 修复/消除对应 finding 后按钩子要求重扫再推；② 启动 ZCode 前设 `MIMOSA_GIT_GATE_MODE=warn`（high 只提示不拦）或 `MIMOSA_NO_GIT_GATE=1`（关 Git 门）；③ 在终端直接 `git commit && git push`（终端不经 ZCode 钩子，仍会过 `.hooks/pre-commit` 项目守护）。v26 视觉重设计提交系经 owner 明示授权，用 `gh api`（REST：trees→commits→update ref）直推 + 本地 `git fetch && git reset origin/main` 对齐完成，未改动钩子/插件/扫描状态
 - **git 代理坑**：本机 git 配了 `http.proxy=127.0.0.1:7890`（Clash 类），代理未运行时 push 报 `Failed to connect to 127.0.0.1 port 7890`——绕过：`git -c http.proxy= -c https.proxy= push origin main`；或先启动代理再常规 push
@@ -243,6 +280,14 @@ git status --short
 `git reset origin/main` 是 mixed reset，只动 HEAD 与暂存区、不动工作区文件；
 ZCode 内改项目源文件请走 Edit/Write 工具（Bash 直接写会被「写源旁路」门拦）。
 
+**Windows 主机变体（2026-08-20 起，本机无 gh CLI）**：路径 C 的 REST 调用改用
+`printf "protocol=https\nhost=github.com\n\n" | git credential fill` 取凭据管理器
+token，再用 python urllib 走同一「trees→commits→PATCH refs」流程（token 只进
+变量不回显）。三个坑：①仓库名以连字符结尾——BASE URL 必须以 `/git/` 结尾再拼
+`trees`/`commits`/`refs/...`（否则 404）；②二进制文件不能传本地 blob sha（远端
+不识别），用 `"encoding":"base64"` 的 content 字段；③fetch 对齐带
+`git -c http.proxy= -c https.proxy=`。已验证四提交：4715e1a/6dd4dcd/7419d8f/3063157。
+
 
 ## 验收记录（T8 最终独立验收，2026-07-26）
 - **结论：通过（CO Gate 8 签字），允许作为 v1.0 本地可用版本交付**
@@ -261,7 +306,8 @@ ZCode 内改项目源文件请走 Edit/Write 工具（Bash 直接写会被「写
 - 系统默认 `python3` 为 3.9.6，改用 3.11+；不要假设 `python3.13` 默认可用
 - **OCR 包已迁移 rapidocr 3.x（2026-08-20 入库）**：`rapidocr>=3.9` 统一包（默认 PP-OCRv6 small 内置离线，支持 Python 3.13）；`rapidocr_onnxruntime 1.x` 仅作兜底导入（其 Requires-Python <3.13 的限制只影响兜底路径）；高精度档 .onnx 放 `models/`（已 gitignore）自动启用——本机 modelscope/huggingface 不通，在线拉模型会失败，必须手动放文件
 - macOS 默认无 `xvfb-run`，Web 后端测试用 TestClient/Playwright
-- 验收命令统一使用项目 `.venv/bin/python`（正式支持 Python 3.11+）
+- 验收命令统一使用项目 `.venv/bin/python`（macOS）/ `.venv\Scripts\python`（Windows）（正式支持 Python 3.11+）
+- **板端依赖（2026-08-20）**：psycopg[binary]/psycopg-pool/bcrypt/pyjwt/python-multipart 已装入本机 .venv 供 tests_board；生产/服务器装 `collab_board/board_backend/requirements-board.txt`（主 requirements.txt 不含板端依赖）
 
 ## 守护脚本（Project Guardian）
 - 路径：`.hooks/project_guardian.py`，Hook：`.hooks/pre-commit`
@@ -292,7 +338,10 @@ ZCode 内改项目源文件请走 Edit/Write 工具（Bash 直接写会被「写
 | Web 前端 | `web_frontend/` React+Vite | ✅ 五工作区真实 API + 流程导航；导入财报合并页（两栏：主列+右侧记录栏）+ 历史卡片快速载入 |
 | 数字质检引擎 | `core/numeric_audit.py` | ✅ 双层防护：OCR 字面 + 恒等式/错位归因/跳变/合理性 + 评分；高风险强制人工核验（2026-08-18） |
 | 导入历史/完整载入 | `CO_db.import_history` + `CO_import` 载入路由 | ✅ 卡片/报告点击完整恢复案例（财务+诊断+互动+解锁+报告） |
-| 单元/接口测试 | `tests/` 30 文件 | ✅ 含 e2e 9 spec 34 用例（Playwright） |
+| 月度拆分引擎 | `core/CO_monthly_split_WB-CO-TR-20260820.py` | ✅ 权重→金额+尾差归位+恒等硬门槛+规则兜底（AI 只出形状）（2026-08-20） |
+| 月度拆分 API/状态机 | `web_backend/CO_monthly_WB-CO-TR-20260820.py` + `CO_db.monthly_budget_state` | ✅ 11 端点：第一稿/问答/拆分/下载 + 惰性补写 + stage 单向守卫；37 测试 |
+| 协同看板服务 | `collab_board/`（board_backend 6 模块 + board_frontend SPA + Docker 三件套） | ✅ 本地全绿（20 测试+e2e）；Lighthouse 部署/联调 P6~P7 待续 |
+| 单元/接口测试 | `tests/` 33 文件 | ✅ 含 e2e 10 spec 36 用例（Playwright）+ 板端 tests_board 20 用例 |
 
 ## 验收命令（每次提交前必跑，统一用 `.venv/bin/python`）
 ```bash
@@ -310,6 +359,12 @@ Web 导入验收（需 Playwright Chromium）：
 ```bash
 .venv/bin/python -m pytest tests/CO_test_web_health_WB-CO-TR-20260805160732.py tests/CO_test_web_import_WB-CO-TR-20260805160732.py tests/CO_test_web_import_ext_WB-CO-TR-20260805160732.py -q
 cd web_frontend && npm run build && npx playwright test && cd ..
+```
+协同看板验收（需本地 PostgreSQL；`BOARD_TEST_DATABASE_URL` 未设自动跳过 pytest）：
+```bash
+BOARD_TEST_DATABASE_URL=postgresql://board@127.0.0.1:54329/board_test \
+  .venv/Scripts/python -m pytest collab_board/board_backend/tests_board -q
+cd collab_board/board_frontend && npm run build && npx playwright test && cd ../..
 ```
 
 ## Agent skills 工作流（原 docs/agents，已内联）
@@ -336,4 +391,5 @@ cd web_frontend && npm run build && npx playwright test && cd ..
 ## e2e 夹具说明（2026-08-18）
 - `web_backend/workspaces/202{1,2,3}年审计报告.xlsx`、`demo_output/样例财报_WB-CO-TR-20260805.docx`、`demo_output/样例财报中文_WB-CO-TR-20260805.pdf` 为 e2e 必需夹具（本机原缺失，2026-08-18 用 `data/make_sample` 数据 + STSong-Light CID 字体重新生成，parser 三格式解析验证通过）；新机器跑 e2e 前需保证存在
 - e2e 断言修复（2026-08-19）：`diagnosis_flow.spec.ts:78` 旧文案「导出 Word 报告」在 v25 两段式导出改版后即失效（已用 git stash 对照证实与视觉重设计无关），改为断言②「导出测算模型」卡（getByRole button 防多元素严格模式冲突）；`pdf_img_check` 全量跑偶发 OCR 冷启动超时，单跑即过
-- 本机已知遗留测试失败（与功能无关）：`CO_test_full_ai_report` 9 错误+部分失败（缺真实艺康 PDF，需上级「测试文件」目录）；`test_diagnostic::test_industry_fallback_to_manufacturing` 与 `test_order_independence` ×4（代码行为与测试预期不符：行业回退未保留原名 / 发现项顺序跳项——待修）
+- Windows e2e 要点（2026-08-20）：首次跑需 `npx playwright install chromium`（本机已装）；`playwright.config.ts` webServer 命令带 win32 分支（`.venv\Scripts\python`）；上传类用例（folder_import/identify_auto）临时目录必须 ASCII 前缀——中文路径致 headless-shell 多文件 setInputFiles 崩溃（0xC0000409），文件名本身保持中文契约不变；板端 e2e 前端 vite 须显式绑 127.0.0.1（默认 localhost 可能仅 IPv6，探活 127.0.0.1 会超时）
+- 本机已知遗留测试失败（与功能无关）：`CO_test_full_ai_report` 9 错误+部分失败（缺真实艺康 PDF，需上级「测试文件」目录）；`test_pdf_scan_parse::test_real_pdf_fixtures_are_project_portable`（同缺真实 PDF 夹具，2026-08-20 确认）；`test_diagnostic::test_industry_fallback_to_manufacturing` 与 `test_order_independence` ×4（代码行为与测试预期不符：行业回退未保留原名 / 发现项顺序跳项——待修）
