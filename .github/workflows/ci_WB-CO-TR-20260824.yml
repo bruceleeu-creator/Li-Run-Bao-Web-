@@ -1,0 +1,219 @@
+# 利润宝 · CI（GitHub Actions，2026-08-24）
+# 按合同拆分分组配置（specs 设计契约「模块 A 本地端 / 模块 B 云端看板」× AGENTS.md「验收命令」分组）：
+#   guardian    = 项目守护（质量门禁 7 维度，错误阻塞 / 警告放行）
+#   backend     = 模块 A 后端（全量 pytest + make_sample；已知遗留经 scripts/CO_ci_pytest 排除）
+#   web-e2e     = 模块 A 前端（Playwright 37 用例基线，必须走 npm run test:e2e 隔离启动器）
+#   board-tests = 模块 B 后端（tests_board + postgres:16 服务容器，P4 阶段门禁）
+#   board-e2e   = 模块 B 前端（npm run build + Playwright 最小剧本，P5 阶段门禁）
+#   docker      = 两部署单元镜像构建验证（主应用 8082 / 协同看板 8081）
+#   deploy      = main push 且上述全绿 → 调 deploy 工作流按 README 5.8 SOP 上线（未配 secrets 则跳过）
+name: CI · 利润宝（合同分组）
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  guardian:
+    name: 守护 · 项目门禁（guardian 7 维）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 项目守护者（错误阻塞；警告放行 = AGENTS 既定口径）
+        run: |
+          set +e
+          python .hooks/project_guardian.py
+          code=$?
+          set -e
+          if [ "$code" -ge 2 ]; then
+            echo "::error::guardian 退出码 $code（存在必须修复的错误）"
+            exit "$code"
+          fi
+          echo "guardian 退出码 $code（0=全部通过 / 1=有警告，放行）"
+
+  backend:
+    name: 模块A · 后端全量 pytest + make_sample
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # 与根 Dockerfile python:3.12-slim 同线
+          cache: pip
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: 全量 pytest（排除 AGENTS 已知遗留）
+        run: bash scripts/CO_ci_pytest_WB-CO-TR-20260824.sh
+      - name: 样例数据生成
+        run: python data/make_sample.py
+
+  web-e2e:
+    name: 模块A · 前端构建 + Playwright e2e（37 基线）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web_frontend/package-lock.json
+      - name: 根目录 .venv（playwright webServer 约定路径 .venv/bin/python）
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+      - name: npm ci
+        working-directory: web_frontend
+        run: npm ci
+      - name: 安装 Chromium
+        working-directory: web_frontend
+        run: npx playwright install --with-deps chromium
+      - name: e2e（必须走 npm run test:e2e 隔离启动器）
+        working-directory: web_frontend
+        run: npm run test:e2e
+
+  board-tests:
+    name: 模块B · 看板后端 tests_board（P4 门禁）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: board
+          POSTGRES_PASSWORD: board
+          POSTGRES_DB: board
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U board -d board"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      BOARD_TEST_DATABASE_URL: postgresql://board:board@127.0.0.1:5432/board_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装依赖（主 + 板端）
+        run: python -m pip install -r requirements.txt -r collab_board/board_backend/requirements-board.txt
+      - name: 建测试库 board_test
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+          url = os.environ["BOARD_TEST_DATABASE_URL"]
+          base, name = url.rsplit("/", 1)
+          with psycopg.connect(base + "/board", autocommit=True) as c:
+              c.execute(f'CREATE DATABASE "{name}"')
+          print("created database:", name)
+          PY
+      - name: tests_board
+        working-directory: collab_board/board_backend
+        run: python -m pytest tests_board -q
+
+  board-e2e:
+    name: 模块B · 看板前端构建 + e2e（P5 门禁）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: board
+          POSTGRES_PASSWORD: board
+          POSTGRES_DB: board
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U board -d board"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      BOARD_E2E_DB: postgresql://board:board@127.0.0.1:5432/board_e2e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: collab_board/board_frontend/package-lock.json
+      - name: 根目录 .venv（board playwright webServer 约定路径 .venv/bin/python）
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt -r collab_board/board_backend/requirements-board.txt
+      - name: 建测试库 board_e2e
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+          url = os.environ["BOARD_E2E_DB"]
+          base, name = url.rsplit("/", 1)
+          with psycopg.connect(base + "/board", autocommit=True) as c:
+              c.execute(f'CREATE DATABASE "{name}"')
+          print("created database:", name)
+          PY
+      - name: npm ci + 生产构建
+        working-directory: collab_board/board_frontend
+        run: |
+          npm ci
+          npm run build
+      - name: 安装 Chromium
+        working-directory: collab_board/board_frontend
+        run: npx playwright install --with-deps chromium
+      - name: e2e 最小剧本
+        working-directory: collab_board/board_frontend
+        run: npx playwright test
+
+  docker:
+    name: 部署单元 · 两镜像构建验证（8082 主应用 / 8081 看板）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 主应用镜像（COPY 需 web_frontend/dist）
+        run: |
+          cd web_frontend && npm ci && npm run build && cd ..
+          docker build -t lirunbao-app:ci .
+      - name: 看板镜像（COPY 需 board_frontend/dist）
+        run: |
+          cd collab_board/board_frontend && npm ci && npm run build && cd ../..
+          docker build -t collab_board-app:ci collab_board/
+
+  deploy:
+    name: 上线 · 服务器更新（README 5.8）
+    needs: [guardian, backend, web-e2e, board-tests, board-e2e, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy_WB-CO-TR-20260824.yml
+    with:
+      target: auto
+    secrets: inherit

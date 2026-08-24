@@ -297,6 +297,8 @@ curl http://49.232.160.7:8081/api/health   # 看板 → {"status":"ok","db":true
 - **容器重启策略**：db/app 均 `unless-stopped`，服务器重启自动拉起
 - **安全**：云端不存放任何财报原始数据（财报只在本机处理）；看板只存任务/进度；`.env` 与 AI 配置均 chmod 600 且不入镜像
 
+**自动更新（GitHub Actions，2026-08-24）**：仓库已配置 CI/CD——推送到 main 后自动跑六分组检查（守护门禁 / 模块A 全量 pytest / 模块A e2e / 模块B 板端测试+e2e / 双 Docker 镜像构建），全绿后按上面同一 SOP 自动打包上线（按改动路径自动判定只更主应用 / 只更看板 / 两者；纯文档提交不碰服务器）。首次使用需在仓库 **Settings → Secrets and variables → Actions** 配置三个 secret：`LRB_SSH_HOST`（49.232.160.7）、`LRB_SSH_USER`（root）、`LRB_SSH_KEY`（部署私钥全文，即本机 `~/.ssh/lrb_board` 对应私钥）；未配置时上线步骤自动跳过、CI 不报错。也可在 Actions 页手动触发 Deploy 工作流选择目标。细节见 AGENTS.md「GitHub Actions CI/CD」节。
+
 ---
 
 ## 六、数据安全与合规

@@ -1,0 +1,154 @@
+# 利润宝 · CD（服务器线上更新，2026-08-24）
+# 流程严格复刻 README 5.8「一键更新」SOP：构建前端 dist → tar 打包（排除用户数据/缓存）→
+# scp 上传 → 服务器解压 → nohup docker compose up -d --build（长构建分离，防腾讯云 SSH 网关掐断）
+# → 外网 health 轮询验证（8082 主应用 / 8081 看板）。
+# 入口：① ci 工作流尾 job（main push 且 CI 全绿）自动调用，target=auto 按 git diff 判定；
+#       ② 手动 workflow_dispatch（target 可选 auto/app/board/both/none）。
+# 必配 secrets（Settings → Secrets and variables → Actions；未配置时以 notice 跳过、CI 不红）：
+#   LRB_SSH_HOST = 49.232.160.7      LRB_SSH_USER = root
+#   LRB_SSH_KEY  = 部署私钥全文（Windows 主机 ~/.ssh/lrb_board 对应的私钥，服务器 authorized_key 已有公钥）
+name: Deploy · 服务器线上更新
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: "auto=按 git diff 判定 / app=仅主应用 / board=仅看板 / both=两者 / none=跳过"
+        type: string
+        default: auto
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "auto/app/board/both/none"
+        type: string
+        default: both
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: 服务器更新（README 5.8 SOP）
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      LRB_SSH_HOST: ${{ secrets.LRB_SSH_HOST }}
+      LRB_SSH_USER: ${{ secrets.LRB_SSH_USER }}
+      LRB_SSH_KEY: ${{ secrets.LRB_SSH_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: 判定部署目标（auto：按 HEAD^..HEAD 变更路径）
+        run: |
+          T="${{ inputs.target }}"
+          if [ "$T" = "auto" ]; then
+            if [ "${{ github.event_name }}" = "push" ] && git rev-parse HEAD^ >/dev/null 2>&1; then
+              CHANGED=$(git diff --name-only HEAD^ HEAD || true)
+              APP=0
+              BOARD=0
+              printf '%s\n' "$CHANGED" | grep -qE '^(core/|web_backend/|web_frontend/|data/|demo_output/cases/|Dockerfile|docker-compose\.yml|requirements\.txt)' && APP=1
+              printf '%s\n' "$CHANGED" | grep -qE '^collab_board/' && BOARD=1
+              if [ "$APP" = "0" ] && [ "$BOARD" = "0" ]; then
+                T=none # 纯文档/CI 自身变更 → 不动服务器
+              elif [ "$APP" = "1" ] && [ "$BOARD" = "1" ]; then
+                T=both
+              elif [ "$APP" = "1" ]; then
+                T=app
+              else
+                T=board
+              fi
+            else
+              T=both
+            fi
+          fi
+          echo "TARGET=$T" >> "$GITHUB_ENV"
+          echo "部署目标：$T"
+
+      - name: secrets 检查（未配置则跳过整个部署）
+        run: |
+          if [ -z "$LRB_SSH_HOST" ] || [ -z "$LRB_SSH_USER" ] || [ -z "$LRB_SSH_KEY" ]; then
+            echo "SKIP_DEPLOY=1" >> "$GITHUB_ENV"
+            echo "::notice::未配置 LRB_SSH_HOST / LRB_SSH_USER / LRB_SSH_KEY secrets，本次跳过部署；配置后手动触发 Deploy 工作流即可真正上线（见 AGENTS.md「GitHub Actions CI/CD」节）"
+          fi
+
+      - name: 准备 SSH（私钥 + known_hosts + 连通性探针）
+        if: env.SKIP_DEPLOY != '1' && env.TARGET != 'none'
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$LRB_SSH_KEY" > ~/.ssh/lrb_ci_key
+          chmod 600 ~/.ssh/lrb_ci_key
+          ssh-keyscan -H "$LRB_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/lrb_ci_key -o BatchMode=yes "$LRB_SSH_USER@$LRB_SSH_HOST" 'echo SSH-OK'
+
+      - uses: actions/setup-node@v4
+        if: env.SKIP_DEPLOY != '1' && (env.TARGET == 'app' || env.TARGET == 'both')
+        with:
+          node-version: 20
+
+      - name: 主应用 · 构建前端 + 打包（README 5.8 原命令）
+        if: env.SKIP_DEPLOY != '1' && (env.TARGET == 'app' || env.TARGET == 'both')
+        run: |
+          cd web_frontend && npm ci && npm run build && cd ..
+          tar --force-local -czf /tmp/lirunbao.tar.gz -C "$GITHUB_WORKSPACE" \
+            --exclude="__pycache__" --exclude="*.pyc" --exclude=".mimosa" --exclude=".pytest_cache" \
+            --exclude="web_backend/workspaces" \
+            Dockerfile docker-compose.yml requirements.txt web_backend core data demo_output/cases web_frontend/dist
+
+      - name: 主应用 · 上传 + 解压 + 重建（nohup 分离）
+        if: env.SKIP_DEPLOY != '1' && (env.TARGET == 'app' || env.TARGET == 'both')
+        run: |
+          scp -i ~/.ssh/lrb_ci_key /tmp/lirunbao.tar.gz "$LRB_SSH_USER@$LRB_SSH_HOST:/tmp/"
+          ssh -i ~/.ssh/lrb_ci_key "$LRB_SSH_USER@$LRB_SSH_HOST" \
+            'tar -xzf /tmp/lirunbao.tar.gz -C /www/wwwroot/lirunbao'
+          ssh -i ~/.ssh/lrb_ci_key "$LRB_SSH_USER@$LRB_SSH_HOST" \
+            'cd /www/wwwroot/lirunbao && nohup docker compose up -d --build > /tmp/lirunbao_build.log 2>&1 < /dev/null &'
+
+      - name: 主应用 · health 轮询验证（8082）
+        if: env.SKIP_DEPLOY != '1' && (env.TARGET == 'app' || env.TARGET == 'both')
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 5 "http://$LRB_SSH_HOST:8082/api/health"; then
+              echo ""
+              echo "主应用 health OK（第 $i 次探测）"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::主应用 health 超时（10 分钟）；服务器构建日志尾部："
+          ssh -i ~/.ssh/lrb_ci_key "$LRB_SSH_USER@$LRB_SSH_HOST" 'tail -50 /tmp/lirunbao_build.log' || true
+          exit 1
+
+      - name: 看板 · 构建前端 + 打包（打 collab_board 内容，不带外层目录）
+        if: env.SKIP_DEPLOY != '1' && (env.TARGET == 'board' || env.TARGET == 'both')
+        run: |
+          cd collab_board/board_frontend && npm ci && npm run build && cd ../..
+          tar -czf /tmp/collab_board.tar.gz -C "$GITHUB_WORKSPACE/collab_board" \
+            --exclude="__pycache__" --exclude="*.pyc" \
+            board_backend board_frontend/dist Dockerfile docker-compose.yml \
+            nginx deploy board_e2e_server.py
+
+      - name: 看板 · 上传 + 解压 + 重建（nohup 分离；不触碰服务器 .env）
+        if: env.SKIP_DEPLOY != '1' && (env.TARGET == 'board' || env.TARGET == 'both')
+        run: |
+          scp -i ~/.ssh/lrb_ci_key /tmp/collab_board.tar.gz "$LRB_SSH_USER@$LRB_SSH_HOST:/tmp/"
+          ssh -i ~/.ssh/lrb_ci_key "$LRB_SSH_USER@$LRB_SSH_HOST" \
+            'tar -xzf /tmp/collab_board.tar.gz -C /www/wwwroot/collab_board'
+          ssh -i ~/.ssh/lrb_ci_key "$LRB_SSH_USER@$LRB_SSH_HOST" \
+            'cd /www/wwwroot/collab_board && nohup docker compose up -d --build > /tmp/collab_build.log 2>&1 < /dev/null &'
+
+      - name: 看板 · health 轮询验证（8081）
+        if: env.SKIP_DEPLOY != '1' && (env.TARGET == 'board' || env.TARGET == 'both')
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 5 "http://$LRB_SSH_HOST:8081/api/health"; then
+              echo ""
+              echo "看板 health OK（第 $i 次探测）"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::看板 health 超时（10 分钟）；服务器构建日志尾部："
+          ssh -i ~/.ssh/lrb_ci_key "$LRB_SSH_USER@$LRB_SSH_HOST" 'tail -50 /tmp/collab_build.log' || true
+          exit 1
