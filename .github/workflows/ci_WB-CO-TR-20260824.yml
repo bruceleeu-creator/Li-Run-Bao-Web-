@@ -168,9 +168,9 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install -r requirements.txt -r collab_board/board_backend/requirements-board.txt
-      - name: 建测试库 board_e2e
+      - name: 建测试库 board_e2e（依赖在 .venv 内，须用 .venv 解释器）
         run: |
-          python - <<'PY'
+          .venv/bin/python - <<'PY'
           import os
           import psycopg
           url = os.environ["BOARD_E2E_DB"]
