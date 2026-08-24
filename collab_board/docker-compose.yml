@@ -1,5 +1,5 @@
 # 协同看板 · 腾讯云轻量服务器单机编排
-# db 仅容器内网（不映射公网端口）；app 8080 对外（控制台防火墙另行放行）
+# db 仅容器内网（不映射公网端口）；app 容器 8080 → 宿主 8081 对外（8080 被宝塔 nginx 占用）
 services:
   db:
     image: postgres:16-alpine
@@ -27,7 +27,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:?请在 .env 设置 JWT_SECRET（≥32 位随机）}
       BOARD_ENV: prod
     ports:
-      - "8080:8080"
+      # 宿主 8080 被宝塔 nginx 占用，线上约定映射 8081（README 5.8；控制台防火墙已放行）
+      - "8081:8080"
 
 volumes:
   board_pgdata:
