@@ -1,9 +1,11 @@
 """利润宝 · AI 整理预览 API 路由。
 
 端点：
-- GET  /api/ai/config    读取配置状态（不含 key）
-- POST /api/ai/config    保存配置（key 仅内存）
-- POST /api/ai/clear     清空配置恢复离线
+- GET  /api/ai/config    读取配置状态（不含 key，附脱敏提示）
+- POST /api/ai/config    保存配置（key 仅内存，永不落盘）
+- POST /api/ai/clear     清空配置恢复离线（含 base_url/model）
+- POST /api/ai/key/clear 仅清除内存 Key（页面关闭 sendBeacon 调用）
+- POST /api/ai/keepalive 前端心跳：延长内存 Key 存活（TTL 兜底配套）
 - POST /api/ai/summarize 把预览内容整理为 markdown（自动保存到报告库）
 - GET  /api/ai-reports   列出已保存的 AI 报告
 - GET  /api/ai-reports/{id}  查看报告详情
@@ -77,6 +79,18 @@ def save_config(body: AIConfigIn) -> dict:
 @router.post("/clear")
 def clear_config() -> dict:
     return ai_mod.clear_config()
+
+
+@router.post("/key/clear")
+def clear_api_key() -> dict:
+    """页面关闭时 sendBeacon 调用：仅清除内存 Key，保留 base_url/model。"""
+    return ai_mod.clear_api_key()
+
+
+@router.post("/keepalive")
+def keepalive() -> dict:
+    """前端心跳（页面打开期间每分钟一次）：延长内存 Key 存活。"""
+    return ai_mod.keepalive()
 
 
 @router.post("/summarize")

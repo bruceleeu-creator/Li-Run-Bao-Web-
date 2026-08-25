@@ -1,9 +1,14 @@
 """利润宝 · Web AI 配置与调用（可选增强）。
 
-配置持久化：base_url / model / api_key 写入 .ai_config.json（用户选择
-「配一次全局可用、重启免重输」）；`get_config()` 响应不返回 api_key，
-避免前端回显敏感字段。未配置时绝不触网；调用失败由前端展示提示，
-不影响主流程。
+配置存储（2026-08-25 安全加固）：
+- base_url / model 持久化到 .ai_config.json（非敏感，重启免重输）
+- api_key 仅保存在进程内存，**永不落盘**：进程重启即失效需重新填写；
+  旧版本文件中遗留的 api_key 在加载时自动擦除
+- 内存 Key 空闲超过 _KEY_TTL_SECONDS（无前端心跳/无 AI 调用）自动清除；
+  页面关闭由前端 sendBeacon 调 /api/ai/key/clear 即时清除，TTL 为崩溃兜底
+- `get_config()` 响应不返回 api_key，仅返回脱敏提示（key_hint）
+
+未配置时绝不触网；调用失败由前端展示提示，不影响主流程。
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import math
 import os
 import re
 import threading
+import time
 import importlib
 from pathlib import Path
 from typing import Any
@@ -27,15 +33,64 @@ PDFTextChunk = _full_pdf_reader.PDFTextChunk
 EXTRACT_MAX_TOKENS = _full_pdf_reader.EXTRACT_MAX_TOKENS
 FINAL_MAX_TOKENS = _full_pdf_reader.FINAL_MAX_TOKENS
 
-_ROOT = Path(__file__).resolve().parent.parent
+# 配置文件 IO 独立模块：路径白名单校验与读写都在其中，本模块只做内存态管理
+_config_io = importlib.import_module(
+    "web_backend.CO_ai_config_io_WB-CO-TR-20260825"
+)
+
+# 项目根 = 本文件（web_backend/）的上级目录；用 parents[1] 避免路径穿越嫌疑写法
+_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_AI_CONFIG_FILE = _ROOT / ".ai_config.json"
 # 官方默认值：Base URL / 模型留空时自动回退，用户只需填 API Key
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 
 _lock = threading.Lock()
-# 内存态：base_url / model / api_key（均持久化到 .ai_config.json）
+# 内存 Key 空闲存活期（秒）：无心跳/无调用超过该时长自动清除（防偷窃兜底）
+_KEY_TTL_SECONDS = 600
+_EXPIRY_CHECK_INTERVAL = 30.0
+# 内存态：base_url / model（持久化）+ api_key（仅内存，不落盘）+ 活动时间戳
 _state: dict = {"base_url": "", "model": "", "api_key": ""}
+_expiry_thread_started = False
+
+
+def _touch_locked() -> None:
+    """记录 Key 最近一次活动（保存/心跳/AI 调用均算）。须持有 _lock。"""
+    _state["_last_seen"] = time.monotonic()
+
+
+def _expire_key_if_due_locked() -> None:
+    """内存 Key 空闲超 TTL 即物理清除。须持有 _lock。"""
+    if not _state.get("api_key"):
+        return
+    last = float(_state.get("_last_seen") or 0.0)
+    if time.monotonic() - last > _KEY_TTL_SECONDS:
+        _state["api_key"] = ""
+        _state["_last_seen"] = 0.0
+
+
+def _key_hint_locked() -> str:
+    """脱敏 Key 提示（sk-***末4位）；无 Key 返回空串。须持有 _lock。"""
+    key = str(_state.get("api_key") or "")
+    if not key:
+        return ""
+    return "sk-***" + key[-4:]
+
+
+def _start_expiry_thread_locked() -> None:
+    """首个 Key 入内存时启动守护线程，周期性物理清除过期 Key（不等下次访问）。"""
+    global _expiry_thread_started
+    if _expiry_thread_started:
+        return
+    _expiry_thread_started = True
+
+    def _loop() -> None:
+        while True:
+            time.sleep(_EXPIRY_CHECK_INTERVAL)
+            with _lock:
+                _expire_key_if_due_locked()
+
+    threading.Thread(target=_loop, name="ai-key-expiry", daemon=True).start()
 
 
 def _get_ai_config_path() -> Path:
@@ -45,24 +100,22 @@ def _get_ai_config_path() -> Path:
 
 
 def _load_persisted() -> dict:
-    """读取持久化配置（base_url/model/api_key），供启动恢复。"""
-    path = _get_ai_config_path()
-    if not path.exists():
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            cfg = json.load(fh)
-        return {
-            "base_url": str(cfg.get("base_url", "")),
-            "model": str(cfg.get("model", "")),
-            "api_key": str(cfg.get("api_key", "")),
-        }
-    except Exception:
-        return {}
+    """读取持久化配置（仅 base_url/model；API Key 永不落盘）。
+
+    旧版本文件若遗留 api_key 明文，立即重写文件擦除，防止磁盘残留。
+    """
+    cfg = _config_io.read_config_file(_get_ai_config_path())
+    base_url = str(cfg.get("base_url", ""))
+    model = str(cfg.get("model", ""))
+    if cfg.get("api_key"):
+        _config_io.write_config_file(
+            _get_ai_config_path(), {"base_url": base_url, "model": model}
+        )
+    return {"base_url": base_url, "model": model}
 
 
 def _ensure_loaded() -> None:
-    """首次访问前从磁盘恢复配置（进程重启后 base_url/model/api_key 仍在）。"""
+    """首次访问前从磁盘恢复配置（重启后仅 base_url/model 恢复，Key 需重输）。"""
     with _lock:
         if _state.get("_loaded"):
             return
@@ -71,13 +124,16 @@ def _ensure_loaded() -> None:
 
 
 def get_config() -> dict:
-    """返回前端可读配置（不含 api_key）。"""
+    """返回前端可读配置（不含 api_key；附脱敏提示与 TTL 秒数）。"""
     _ensure_loaded()
     with _lock:
+        _expire_key_if_due_locked()
         return {
             "base_url": _state["base_url"],
             "model": _state["model"],
             "configured": bool(_state["base_url"] and _state["api_key"] and _state["model"]),
+            "key_hint": _key_hint_locked(),
+            "key_ttl_seconds": _KEY_TTL_SECONDS,
         }
 
 
@@ -85,38 +141,38 @@ def get_credentials() -> dict:
     """返回 DeepSeek 调用所需的完整凭据（含 api_key，仅后端内部使用）。"""
     _ensure_loaded()
     with _lock:
+        _expire_key_if_due_locked()
+        if _state.get("api_key"):
+            _touch_locked()
         return {
             "base_url": _state["base_url"],
             "model": _state["model"],
-            "api_key": _state["api_key"],
+            "api_key": _state.get("api_key", ""),
         }
 
 
 def save_config(base_url: str, model: str, api_key: str) -> dict:
-    """保存配置：base_url/model/api_key 均持久化到 .ai_config.json。
+    """保存配置：base_url/model 持久化；API Key 仅存进程内存（不落盘）。
 
-    Base URL / 模型留空时自动回退官方默认值（用户只需填 API Key）。
+    Base URL / 模型留空时自动回退官方默认值；API Key 留空且内存已有 Key
+    时沿用旧 Key（同一会话内改其他字段免重输）。
     """
     _ensure_loaded()
     with _lock:
+        _expire_key_if_due_locked()
         _state["base_url"] = (base_url or "").strip() or DEFAULT_BASE_URL
         _state["model"] = (model or "").strip() or DEFAULT_MODEL
         if api_key:
             _state["api_key"] = (api_key or "").strip()
-        persisted = {
-            "base_url": _state["base_url"],
-            "model": _state["model"],
-            "api_key": _state["api_key"],
-        }
-        try:
-            path = _get_ai_config_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = str(path) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(persisted, fh, ensure_ascii=False, indent=2)
-            os.replace(tmp, str(path))
-        except OSError:
-            pass  # 持久化失败不阻塞内存配置
+            _touch_locked()
+            _start_expiry_thread_locked()
+    try:
+        _config_io.write_config_file(
+            _get_ai_config_path(),
+            {"base_url": _state["base_url"], "model": _state["model"]},
+        )
+    except (OSError, ValueError):
+        pass  # 持久化失败不阻塞内存配置
     cfg = get_config()
     if not cfg["configured"]:
         # 明确告知缺失项，避免前端把「保存成功但未配置」误当成正常结果
@@ -125,7 +181,7 @@ def save_config(base_url: str, model: str, api_key: str) -> dict:
             for label, value in (
                 ("Base URL", _state["base_url"]),
                 ("模型", _state["model"]),
-                ("API Key", _state["api_key"]),
+                ("API Key", _state.get("api_key", "")),
             )
             if not value
         ]
@@ -134,18 +190,39 @@ def save_config(base_url: str, model: str, api_key: str) -> dict:
 
 
 def clear_config() -> dict:
-    """清空配置并恢复离线。"""
+    """清空全部配置（内存 Key + 持久化的 base_url/model）并恢复离线。"""
     _ensure_loaded()
     with _lock:
         _state["base_url"] = ""
         _state["model"] = ""
         _state["api_key"] = ""
-        try:
-            path = _get_ai_config_path()
-            if path.exists():
-                path.unlink()
-        except OSError:
-            pass
+        _state["_last_seen"] = 0.0
+    try:
+        _config_io.delete_config_file(_get_ai_config_path())
+    except (OSError, ValueError):
+        pass
+    return get_config()
+
+
+def clear_api_key() -> dict:
+    """仅清除内存中的 API Key（页面关闭时 sendBeacon 调用）。
+
+    Base URL / 模型及其磁盘持久化保留，下次只需重输 Key。
+    """
+    _ensure_loaded()
+    with _lock:
+        if _state.get("api_key"):
+            _state["api_key"] = ""
+            _state["_last_seen"] = 0.0
+    return get_config()
+
+
+def keepalive() -> dict:
+    """前端心跳：页面仍打开时延长内存 Key 存活（无 Key 时空操作）。"""
+    _ensure_loaded()
+    with _lock:
+        if _state.get("api_key"):
+            _touch_locked()
     return get_config()
 
 
@@ -153,8 +230,11 @@ def _engine(timeout: float = 8.0) -> AIEngine | None:
     """构造 AIEngine（可用时）。timeout 可覆盖默认超时（大文本生成需更长）。"""
     _ensure_loaded()
     with _lock:
+        _expire_key_if_due_locked()
+        if _state.get("api_key"):
+            _touch_locked()
         base = _state["base_url"]
-        key = _state["api_key"]
+        key = _state.get("api_key", "")
         model = _state["model"]
     if not (base and key and model):
         return None

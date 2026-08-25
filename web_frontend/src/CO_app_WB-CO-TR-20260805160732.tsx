@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   clearAIConfig,
+  clearAIKeyBeacon,
   clearSession,
   confirmInteraction,
   deleteReport,
@@ -19,6 +20,7 @@ import {
   fetchYearsSummaryJob,
   importFiles,
   identifyCompany,
+  keepaliveAI,
   loadImportHistory,
   previewFiles,
   recommendIndustry,
@@ -252,6 +254,11 @@ const NAV_ITEMS: readonly { key: Workspace; label: string; group: string }[] = [
 
 /** 云端协同任务看板地址（独立服务，利润宝内嵌访问入口） */
 const BOARD_URL = "http://49.232.160.7:8081";
+// 内存 Key 的标签页级暂存：仅本标签页存活（刷新自动恢复、关闭标签页即清），
+// 后端重启或页面关闭后 Key 失效时用它免重输
+const AI_KEY_STORAGE = "lrb_ai_api_key";
+// 后端内存 Key 心跳间隔（毫秒）：须明显小于后端 TTL（默认 600s）
+const AI_KEEPALIVE_MS = 60_000;
 
 /** ① 经营分析报告：Word/PDF 是同一份内容，先生成 DeepSeek 分析再导出 */
 const ANALYSIS_EXPORT_ITEMS: readonly ExportDeliverable[] = [
@@ -620,6 +627,7 @@ function ImportWorkspacePage({
   onClear,
   aiConfigured,
   aiConfig,
+  aiKeyHint,
   configBusy,
   configError,
   reportBusy,
@@ -640,6 +648,7 @@ function ImportWorkspacePage({
   onClear: () => void;
   aiConfigured: boolean;
   aiConfig: { base_url: string; model: string; api_key: string };
+  aiKeyHint: string;
   configBusy: boolean;
   configError: string;
   reportBusy: boolean;
@@ -772,6 +781,7 @@ function ImportWorkspacePage({
           onClear={onClear}
           aiConfigured={aiConfigured}
           aiConfig={aiConfig}
+          aiKeyHint={aiKeyHint}
           aiBusy={configBusy}
           aiError={configError}
           aiJob={reportJob}
@@ -929,6 +939,7 @@ const DEFAULT_MODEL = "deepseek-v4-flash";
 function AiConfigPanel({
   configured,
   config,
+  keyHint,
   busy,
   error,
   onSave,
@@ -936,6 +947,8 @@ function AiConfigPanel({
 }: {
   configured: boolean;
   config: { base_url: string; model: string; api_key: string };
+  /** 内存 Key 脱敏提示（sk-***abcd），由后端返回 */
+  keyHint?: string;
   busy: boolean;
   error: string;
   onSave: (cfg: { base_url: string; model: string; api_key: string }) => void;
@@ -977,7 +990,7 @@ function AiConfigPanel({
           />
         </label>
         <label className="field">
-          <span className="field__label">API Key（已持久化，重启免重输）</span>
+          <span className="field__label">API Key（仅本次会话有效，关闭网页自动清除）</span>
           <input
             className="input"
             type="password"
@@ -1006,7 +1019,9 @@ function AiConfigPanel({
           清空（恢复离线）
         </button>
         <span className={`ai-config__status${configured ? " is-on" : ""}`}>
-          {configured ? "● AI 已配置" : "○ 未配置"}
+          {configured
+            ? `● AI 已配置（${keyHint ? `${keyHint} · ` : ""}内存态，关网页自动清除）`
+            : "○ 未配置"}
         </span>
       </div>
       {!canSave && !busy ? (
@@ -1028,6 +1043,7 @@ function ImportSection({
   onClear,
   aiConfigured,
   aiConfig,
+  aiKeyHint,
   aiBusy,
   aiError,
   aiJob,
@@ -1041,6 +1057,7 @@ function ImportSection({
   onClear: () => void;
   aiConfigured: boolean;
   aiConfig: { base_url: string; model: string; api_key: string };
+  aiKeyHint: string;
   aiBusy: boolean;
   aiError: string;
   /** 导入后自动启动的 AI 总结任务（逐页分段，不会截断） */
@@ -1484,6 +1501,7 @@ function ImportSection({
             <AiConfigPanel
               configured={aiConfigured}
               config={aiConfig}
+              keyHint={aiKeyHint}
               busy={aiBusy}
               error={aiError}
               onSave={onSaveAIConfig}
@@ -3071,6 +3089,7 @@ function ExportPage({ session, unlocked }: { session: SessionResponse; unlocked:
 function SettingsPage({
   aiConfigured,
   aiConfig,
+  aiKeyHint,
   aiBusy,
   aiError,
   onSaveAIConfig,
@@ -3078,6 +3097,7 @@ function SettingsPage({
 }: {
   aiConfigured: boolean;
   aiConfig: { base_url: string; model: string; api_key: string };
+  aiKeyHint: string;
   aiBusy: boolean;
   aiError: string;
   onSaveAIConfig: (cfg: { base_url: string; model: string; api_key: string }) => void;
@@ -3091,11 +3111,15 @@ function SettingsPage({
         <p className="mini-panel__row">
           默认离线：未配置大模型时由规则引擎兜底。配置后用于扫描件 PDF 导入解析、AI 整理、跨年合并报告、模板工作台指标识别。
         </p>
-        <p className="mini-panel__row">配置持久化到本机 .ai_config.json，重启免重输。</p>
+        <p className="mini-panel__row">
+          Base URL 与模型保存在本机；API Key 仅存服务进程内存（不落盘）——关闭网页即清除、
+          10 分钟无活动自动清除、重启后需重新输入（同一标签页内刷新会自动恢复，无需重输）。
+        </p>
       </div>
       <AiConfigPanel
         configured={aiConfigured}
         config={aiConfig}
+        keyHint={aiKeyHint}
         busy={aiBusy}
         error={aiError}
         onSave={onSaveAIConfig}
@@ -3141,6 +3165,8 @@ export function App() {
   // 全局 AI 配置状态：设置页与导入页共用，配一次处处可用
   const [aiConfigured, setAiConfigured] = useState(false);
   const [aiConfig, setAiConfig] = useState({ base_url: "", model: "deepseek-v4-flash", api_key: "" });
+  // 内存 Key 脱敏提示（如 sk-***abcd），让用户知道 Key 仍在服务进程内存中
+  const [aiKeyHint, setAiKeyHint] = useState("");
   const [aiCfgBusy, setAiCfgBusy] = useState(false);
   const [aiCfgError, setAiCfgError] = useState("");
   // AI 合并报告全局 state：切换工作区后仍保留，不重新请求
@@ -3177,7 +3203,22 @@ export function App() {
     fetchAIConfig()
       .then((cfg) => {
         setAiConfigured(cfg.configured);
+        setAiKeyHint(cfg.key_hint || "");
         setAiConfig((c) => ({ ...c, base_url: cfg.base_url, model: cfg.model || "deepseek-v4-flash" }));
+        // 刷新页面场景：后端 Key 已被 pagehide beacon 清除，用标签页级暂存自动恢复
+        const storedKey = sessionStorage.getItem(AI_KEY_STORAGE);
+        if (storedKey && !cfg.configured) {
+          void saveAIConfig({
+            base_url: cfg.base_url || "https://api.deepseek.com",
+            model: cfg.model || "deepseek-v4-flash",
+            api_key: storedKey,
+          })
+            .then((saved) => {
+              setAiConfigured(saved.configured);
+              setAiKeyHint(saved.key_hint || "");
+            })
+            .catch(() => undefined);
+        }
       })
       .catch(() => undefined);
     // 启动时恢复诊断/互动完成态（后端持久化，刷新不丢）
@@ -3192,13 +3233,51 @@ export function App() {
       .catch(() => undefined);
   }, []);
 
+  // 内存 Key 生命周期配套：心跳续活 + 页面关闭即时清除（后端 TTL 为崩溃兜底）
+  useEffect(() => {
+    const beat = window.setInterval(() => {
+      void keepaliveAI().then((res) => {
+        if (!res) return;
+        setAiKeyHint(res.key_hint || "");
+        if (!res.configured) {
+          // 后端重启等场景 Key 丢失：标签页暂存仍在则自动重挂
+          const storedKey = sessionStorage.getItem(AI_KEY_STORAGE);
+          if (storedKey) {
+            void saveAIConfig({
+              base_url: res.base_url || "https://api.deepseek.com",
+              model: res.model || "deepseek-v4-flash",
+              api_key: storedKey,
+            })
+              .then((saved) => setAiConfigured(saved.configured))
+              .catch(() => undefined);
+          }
+        }
+      });
+    }, AI_KEEPALIVE_MS);
+    const onHide = () => clearAIKeyBeacon();
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      window.clearInterval(beat);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, []);
+
   const handleSaveAIConfig = async (cfg: { base_url: string; model: string; api_key: string }) => {
     setAiCfgBusy(true);
     setAiCfgError("");
     try {
       const saved = await saveAIConfig(cfg);
       setAiConfigured(saved.configured);
+      setAiKeyHint(saved.key_hint || "");
       setAiConfig({ base_url: saved.base_url, model: saved.model, api_key: cfg.api_key });
+      // Key 只做标签页级暂存（关闭标签页即清），供刷新/后端重启后自动重挂
+      if (cfg.api_key) {
+        try {
+          sessionStorage.setItem(AI_KEY_STORAGE, cfg.api_key);
+        } catch {
+          /* 隐私模式等场景存储不可用：仅失去自动重挂，不影响本次使用 */
+        }
+      }
       setAiCfgError(saved.configured ? "" : saved.error || "配置未完成，请检查 Base URL / 模型 / API Key");
     } catch (e) {
       setAiCfgError(e instanceof Error ? e.message : String(e));
@@ -3213,7 +3292,13 @@ export function App() {
     try {
       const cleared = await clearAIConfig();
       setAiConfigured(cleared.configured);
+      setAiKeyHint("");
       setAiConfig({ base_url: "", model: "deepseek-v4-flash", api_key: "" });
+      try {
+        sessionStorage.removeItem(AI_KEY_STORAGE);
+      } catch {
+        /* 存储不可用时忽略 */
+      }
     } catch (e) {
       setAiCfgError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -3458,6 +3543,7 @@ export function App() {
             onClear={() => void handleClear()}
             aiConfigured={aiConfigured}
             aiConfig={aiConfig}
+            aiKeyHint={aiKeyHint}
             configBusy={aiCfgBusy}
             configError={aiCfgError}
             reportBusy={aiBusy}
@@ -3487,7 +3573,7 @@ export function App() {
       case "export":
         return <ExportPage session={session} unlocked={exportUnlocked} />;
       case "settings":
-        return <SettingsPage aiConfigured={aiConfigured} aiConfig={aiConfig} aiBusy={aiCfgBusy} aiError={aiCfgError} onSaveAIConfig={(cfg) => void handleSaveAIConfig(cfg)} onClearAIConfig={() => void handleClearAIConfig()} />;
+        return <SettingsPage aiConfigured={aiConfigured} aiConfig={aiConfig} aiKeyHint={aiKeyHint} aiBusy={aiCfgBusy} aiError={aiCfgError} onSaveAIConfig={(cfg) => void handleSaveAIConfig(cfg)} onClearAIConfig={() => void handleClearAIConfig()} />;
       case "board":
         return <BoardPage />;
     }

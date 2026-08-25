@@ -84,6 +84,7 @@ EXPECTED_MODULES = {
                     "CO_session_WB-CO-TR-20260805160732.py",
                     "CO_import_WB-CO-TR-20260805160732.py",
                     "CO_ai_WB-CO-TR-20260805160732.py",
+                    "CO_ai_config_io_WB-CO-TR-20260825.py",
                     "CO_ai_report_job_WB-CO-TR-20260807113737.py",
                     "CO_ai_report_pipeline_WB-CO-TR-20260807113737.py",
                     "CO_ai_route_WB-CO-TR-20260805160732.py",

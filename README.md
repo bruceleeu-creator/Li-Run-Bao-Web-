@@ -121,7 +121,7 @@
 
 ### 3.7 AI 能力（可选增强，离线兜底）
 
-配置 OpenAI 兼容接口（默认 DeepSeek）后启用：扫描件 PDF 解析、AI 整理（整理完成自动导入）、跨年合并报告（逐页分段提取 + 确定性校验，防截断）、指标识别、诊断增强、月度拆分出题与权重（失败回退规则）。**未配置或调用失败时静默回退规则引擎，主流程永不阻塞**。API Key 持久化于本机 `.ai_config.json`（已 gitignore），仅内存持有。
+配置 OpenAI 兼容接口（默认 DeepSeek）后启用：扫描件 PDF 解析、AI 整理（整理完成自动导入）、跨年合并报告（逐页分段提取 + 确定性校验，防截断）、指标识别、诊断增强、月度拆分出题与权重（失败回退规则）。**未配置或调用失败时静默回退规则引擎，主流程永不阻塞**。**API Key 仅存服务进程内存、永不落盘（2026-08-25 安全加固）**：关闭网页即清除、10 分钟无活动自动清除、服务重启后需重新输入（同一标签页内刷新自动恢复）；本机 `.ai_config.json` 只保存非敏感的 Base URL 与模型。
 
 ### 3.8 协同任务看板（云端 · 已部署）
 
@@ -215,7 +215,7 @@ cd web_frontend && npm install && npm run build && cd ..
 
 ### 5.4 可选：配置 AI
 
-「设置」页填入 Base URL / 模型 / API Key（三字段齐全才可保存），保存后全局生效、重启免重输。默认适配 DeepSeek（`https://api.deepseek.com` + `deepseek-v4-flash`），任何 OpenAI 兼容接口均可。不配置则全程规则引擎离线运行。
+「设置」页填入 Base URL / 模型 / API Key（三字段齐全才可保存），保存后全局生效。**Key 安全策略**：API Key 只保存在服务进程内存（不写磁盘）——关闭网页自动清除、空闲 10 分钟自动清除、重启需重新输入；同一标签页内刷新页面会自动恢复无需重输。默认适配 DeepSeek（`https://api.deepseek.com` + `deepseek-v4-flash`），任何 OpenAI 兼容接口均可。不配置则全程规则引擎离线运行。
 
 ### 5.5 数据模板（Excel 三 Sheet）
 
@@ -261,7 +261,7 @@ cd collab_board/board_frontend && npm run build && npx playwright test && cd ../
 
 | 服务 | 目录 | 容器端口 | 宿主端口 | 外网地址 | 数据 |
 |------|------|---------|---------|---------|------|
-| 利润宝主应用（本仓库） | `/www/wwwroot/lirunbao` | 8765 | **8082** | http://49.232.160.7:8082 | SQLite+上传+导出在 `lirunbao_workspaces` 卷，AI 配置在 `lirunbao_ai` 卷 |
+| 利润宝主应用（本仓库） | `/www/wwwroot/lirunbao` | 8765 | **8082** | http://49.232.160.7:8082 | SQLite+上传+导出在 `lirunbao_workspaces` 卷，AI 基础配置（Base URL/模型，不含 Key）在 `lirunbao_ai` 卷 |
 | 协同任务看板 | `/www/wwwroot/collab_board` | 8080 | **8081** | http://49.232.160.7:8081 | PostgreSQL 16 卷 `board_pgdata` |
 
 > 端口约定：8080 被宿主宝塔 nginx 占用、8081 看板、8082 主应用（均已放行）；**新增端口需在腾讯云控制台防火墙放行**（自定义 / TCP / 端口 / 0.0.0.0/0 / 允许）。
@@ -295,7 +295,7 @@ curl http://49.232.160.7:8081/api/health   # 看板 → {"status":"ok","db":true
 - **端口被占**：`docker compose up` 报 `address already in use` 时旧容器会卡 `Restarting`，先 `docker rm -f <容器名>` 再 up；容器名可能带 hash 前缀，用 `docker ps` 确认
 - **改代码后镜像层缓存**：只改应用代码（COPY 层）时重建约 1 分钟；改 requirements 才重跑 pip（约 2 分钟，镜像源）
 - **容器重启策略**：db/app 均 `unless-stopped`，服务器重启自动拉起
-- **安全**：云端不存放任何财报原始数据（财报只在本机处理）；看板只存任务/进度；`.env` 与 AI 配置均 chmod 600 且不入镜像
+- **安全**：云端不存放任何财报原始数据（财报只在本机处理）；看板只存任务/进度；`.env` 与 AI 基础配置（不含 Key，Key 永不落盘）均 chmod 600 且不入镜像
 
 **自动更新（GitHub Actions，2026-08-24）**：仓库已配置 CI/CD——推送到 main 后自动跑六分组检查（守护门禁 / 模块A 全量 pytest / 模块A e2e / 模块B 板端测试+e2e / 双 Docker 镜像构建），全绿后按上面同一 SOP 自动打包上线（按改动路径自动判定只更主应用 / 只更看板 / 两者；纯文档提交不碰服务器）。三个 secret（`LRB_SSH_HOST`/`LRB_SSH_USER`/`LRB_SSH_KEY`）已于 2026-08-24 配置完成，deploy 链路就绪；也可在 Actions 页手动触发 Deploy 工作流选择目标。本地一键命令：`bash scripts/一键推送部署_WB-CO-TR-20260824.sh "feat: xxx"`（守护 → 提交 → 推送，内置代理绕过，之后交给 CI）。细节见 AGENTS.md「GitHub Actions CI/CD」节。
 

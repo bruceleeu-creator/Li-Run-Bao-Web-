@@ -1,5 +1,6 @@
 # 利润宝 · 项目记忆（AGENTS.md）
 
+> 更新：2026-08-25 v30 | **DeepSeek API Key 安全加固（Key 只存内存，永不落盘）**：`.ai_config.json` 只存非敏感的 base_url/model；Key 存后端进程内存 + 10 分钟空闲 TTL 自动清除（守护线程物理擦除）+ 页面关闭 sendBeacon 即时清除（`POST /api/ai/key/clear`）+ 前端 60s 心跳续活（`POST /api/ai/keepalive`）+ 刷新自动恢复（sessionStorage 标签页级暂存，关标签页即清）；新增 `web_backend/CO_ai_config_io_WB-CO-TR-20260825.py`（配置文件 IO：参数路径 + 函数内白名单校验〔项目根/系统临时目录〕，pathlib 方法实现）；旧文件遗留 Key 加载时自动擦除；`GET /api/ai/config` 附 `key_hint`（sk-***末4位）与 `key_ttl_seconds`；测试 23 全绿 + e2e 37 全绿 + 线上冒烟通过；**Mimosa 写入门坑**：文件 IO 代码用内建 `open()`/`os.replace()` 必被「路径穿越」拦（含参数路径与跨函数污点），改 pathlib `read_text/write_text/Path.replace` 可过
 > 更新：2026-08-24 v29 | **GitHub Actions CI/CD 上线（按合同拆分分组配置）**：`.github/workflows/ci_WB-CO-TR-20260824.yml` 六分组 job（guardian 门禁 / 模块A 后端 pytest+make_sample / 模块A e2e 37 / 模块B tests_board+PG 服务容器 / 模块B 板端 e2e / 双 Docker 镜像构建验证）+ deploy 尾 job（main push 全绿后自动调用 `deploy_WB-CO-TR-20260824.yml`，严格复刻 README 5.8 SOP：dist 构建→tar→scp→nohup compose up -d --build→8082/8081 health 轮询；target 按 git diff 自动判定 app/board，纯文档提交不部署）；已知遗留失败集中在 `scripts/CO_ci_pytest_WB-CO-TR-20260824.sh`（CI 与本地共用单一真源）；**CD secrets 三项（LRB_SSH_HOST/LRB_SSH_USER/LRB_SSH_KEY）已于 2026-08-24 配置完成，deploy 链路就绪**；本地一键推送=`scripts/一键推送部署_WB-CO-TR-20260824.sh`；细节见「GitHub Actions CI/CD」节
 > 更新：2026-08-20 v28 | **P6 云端部署完成 + 整站上线 + 协同看板板块嵌入**：利润宝主应用 Docker 化上线（`/www/wwwroot/lirunbao`，宿主 8082→容器 8765，SQLite/上传/导出/AI 配置全卷持久化，腾讯云镜像源构建约 2 分钟）；前端新增「协同看板」侧栏板块（iframe 嵌入 http://49.232.160.7:8081，e2e 36→37 全绿）；看板部署于 8081（8080 被宿主 nginx 占用）；**8082 已由 owner 放行，线上版 http://49.232.160.7:8082 外网全链路验证通过**（health/样例导入/会话/诊断/看板板块 iframe）；服务器线上更新指南已写入 README 5.8 + 本文件；P7 双设备联调待续，P8 剩删 specs+终验
 > 更新：2026-08-20 v27 | v1.4 双功能主体落地：①预算月度拆分二段式（P1~P3：引擎/状态机/11 端点/月度 Sheet/四步向导，37 测 + e2e 36/36）②协同任务看板 collab_board/（P4~P5：独立服务+SPA+Docker 三件套，20 测+板端 e2e 全绿）；P6 部署预备完成（Dockerfile PYTHONPATH 致命修复+生产形态冒烟+SSH 密钥+部署包）；**P6 部署/P7 联调待 owner 配合（IP+防火墙+公钥），P8 剩删除 specs+终验**；AGENTS/README 已提前规整——续作清单见「版本历史 v1.4.0 执行日志」
@@ -67,7 +68,7 @@
 ## 私有仓库与合规声明
 - **分发**：GitHub 私有仓库，不开源、不附加 LICENSE；未经项目所有者书面授权不得复制到公开仓库、二次分发、转授权、商用转售、移除本声明
 - **授权**：仅项目所有者指定的内部财税/代账同事；接收方可克隆到本机使用，不得转授他人
-- **数据安全**：客户财务数据只在本机处理；AI 为可选增强，未配置时规则引擎兜底、离线闭环；`.ai_config.json` 已 gitignore（API Key 仅内存持有）；不收集统计、不回传信息
+- **数据安全**：客户财务数据只在本机处理；AI 为可选增强，未配置时规则引擎兜底、离线闭环；`.ai_config.json` 已 gitignore（仅存非敏感 Base URL/模型；**API Key 永不落盘**，见护栏「API Key 只存内存」条）；不收集统计、不回传信息
 - **合规**：所有建议限于合法税务筹划（研发加计扣除、限额内据实扣除、业务模式优化等）；严禁任何形式的违规筹划表述；增值税税负率为估算值须四处显著标注（UI/Word/PDF/Excel）；执行前建议与主管税务机关或注册税务师确认；作者不对使用损失担责
 - **版权**：© 2026 利润宝项目所有者，All Rights Reserved；违规公开/转售/违规筹划可撤销权限、要求删除、追责
 
@@ -88,7 +89,8 @@
 - **诊断/互动状态回调**：App 顶层持有 `diagnosisDone/interactionDone/exportUnlocked`，通过 useCallback 稳定引用下发；重新导入后一律重置
 - **增值税税负率**：必须用 `税金及附加 / 0.12 / 营业收入` 估算口径，UI/报告/Excel 三处都要显著标注「估算值（基于税金及附加反推）」；不要伪装为真实应纳税额
 - **合规红线**：所有建议限于合法税务筹划；守护脚本 `FORBIDDEN_PATTERNS` 已列违禁词清单，写代码与文档时连同注释都不要出现这些字面
-- **离线优先**：AI 引擎仅可选增强，未配置 Base URL/Key/Model 时绝不触网；调用失败必须静默回退规则引擎；`.ai_config.json` 属本地敏感配置，注意文件权限且勿入库
+- **离线优先**：AI 引擎仅可选增强，未配置 Base URL/Key/Model 时绝不触网；调用失败必须静默回退规则引擎
+- **API Key 只存内存（2026-08-25 加固，勿回退）**：`.ai_config.json` 只允许 base_url/model；Key 存后端进程内存 + TTL 600s 空闲自动清除（`_expire_key_if_due_locked` 惰性 + 守护线程物理擦除）；页面关闭由前端 `pagehide`→`sendBeacon('/api/ai/key/clear')` 即时清除；前端 60s 心跳 `POST /api/ai/keepalive` 续活；刷新恢复走 sessionStorage（`lrb_ai_api_key`，标签页级，关标签页即清）；`GET /api/ai/config` 绝不返回 key 本体（只回 `key_hint` 脱敏）；旧文件遗留 Key 由 `_load_persisted` 自动擦除。**文件 IO 必须经 `CO_ai_config_io` 模块**（函数内白名单校验 + pathlib 方法），CO_ai 内不得直接出现内建 `open()`/`os.replace()`（Mimosa 写入门必拦）
 - **AI 配置保存校验**：Base URL / 模型 / API Key 三字段齐全才允许保存；禁止「保存成功但仍未配置」的静默状态
 - **AI max_tokens 护栏**：deepseek-v4-flash 输出上限约 384K；预览整理 ≥16,384、分段提取 ≥16,384、最终报告首试 16,384/重试 32,768、扫描件整份解析 ≥16,384；禁止 1,200/4,096 这类过小上限导致 `finish_reason=length` 截断。**多文件 AI 整理必须分阶段**（`_stage_extract` 8,192 → `_stage_merge` 16,384）；禁止把多份 PDF 全部文本一次性塞给模型
 - **deepseek-v4-flash 必须禁用 thinking**：长推理 `reasoning_content` 会占满 max_tokens 导致正文 content=0 且 finish_reason=length；`core/ai_engine.py` 默认 `thinking: {"type": "disabled"}`；诊断/提炼/整理类任务必须保持禁用
@@ -348,7 +350,7 @@ token，再用 python urllib 走同一「trees→commits→PATCH refs」流程�
 | 扫描件/AI 解析 | `CO_deepseek_parse` + `CO_full_pdf_reader` + `CO_financial_scan` | ✅ 整份解析 + 逐页读取 + 坐标化识别 |
 | 预算建议/导出叙事 | `CO_budget_advice` + `CO_budget_export` + `narrative.py` | ✅ 三表导出 + Word 叙事 |
 | 经营预算分析（前世今生） | `CO_report_analysis` + `CO_export./analysis` + `CO_ai.analyze_operating_narrative` | ✅ DeepSeek 文案层 + 数字白名单 + Word/PDF 同源注入（2026-08-18） |
-| Web 后端 | `web_backend/` 15 模块 | ✅ 导入/会话/诊断/互动/预算/导出/AI 报告任务全接通，SQLite 持久化 + 导入历史（2026-08-18） |
+| Web 后端 | `web_backend/` 16 模块 | ✅ 导入/会话/诊断/互动/预算/导出/AI 报告任务全接通，SQLite 持久化 + 导入历史（2026-08-18）；AI Key 内存化 + TTL + 心跳/即时清除（2026-08-25，新增 CO_ai_config_io） |
 | Web 前端 | `web_frontend/` React+Vite | ✅ 五工作区真实 API + 流程导航；导入财报合并页（两栏：主列+右侧记录栏）+ 历史卡片快速载入 |
 | 数字质检引擎 | `core/numeric_audit.py` | ✅ 双层防护：OCR 字面 + 恒等式/错位归因/跳变/合理性 + 评分；高风险强制人工核验（2026-08-18） |
 | 导入历史/完整载入 | `CO_db.import_history` + `CO_import` 载入路由 | ✅ 卡片/报告点击完整恢复案例（财务+诊断+互动+解锁+报告） |

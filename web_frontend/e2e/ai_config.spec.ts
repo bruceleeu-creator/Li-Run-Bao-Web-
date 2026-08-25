@@ -19,11 +19,23 @@ test("设置页保留已有模型，新表单默认 deepseek-v4-flash 并可保�
   await page.route("**/api/ai/config", async (route) => {
     if (route.request().method() === "POST") {
       const body = route.request().postDataJSON();
-      await route.fulfill({ json: { base_url: body.base_url, model: body.model, configured: true } });
+      await route.fulfill({
+        json: {
+          base_url: body.base_url,
+          model: body.model,
+          configured: true,
+          key_hint: "sk-***e2e1",
+        },
+      });
       return;
     }
     await route.fulfill({
-      json: { base_url: "https://existing.example", model: "deepseek-chat", configured: true },
+      json: {
+        base_url: "https://existing.example",
+        model: "deepseek-chat",
+        configured: true,
+        key_hint: "sk-***test",
+      },
     });
   });
   await page.route("**/api/ai/clear", (route) =>
@@ -35,7 +47,10 @@ test("设置页保留已有模型，新表单默认 deepseek-v4-flash 并可保�
   await expect(page.getByText("AI 可选增强", { exact: false })).toBeVisible();
   await expect(page.getByText("Base URL", { exact: true })).toBeVisible();
   await expect(page.getByText("模型", { exact: true })).toBeVisible();
-  await expect(page.getByText("API Key", { exact: false })).toBeVisible();
+  // 字段标签定向断言（说明文字中也出现「API Key」，需避免严格模式冲突）
+  await expect(page.locator(".field__label", { hasText: "API Key" })).toBeVisible();
+  // 内存 Key 脱敏提示可见（完整 Key 绝不回显）
+  await expect(page.getByText(/sk-\*\*\*test/)).toBeVisible();
   const model = page.getByPlaceholder("deepseek-v4-flash");
   await expect(model).toHaveValue("deepseek-chat");
   // 保存配置后状态变为已配置；已有值不会被默认值覆盖

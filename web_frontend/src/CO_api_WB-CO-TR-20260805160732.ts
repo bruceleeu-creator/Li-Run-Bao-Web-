@@ -190,6 +190,10 @@ export interface AIConfigResponse {
   base_url: string;
   model: string;
   configured: boolean;
+  /** 内存 Key 的脱敏提示（如 sk-***abcd）；未配置为空 */
+  key_hint?: string;
+  /** 内存 Key 空闲存活期（秒），超时自动清除 */
+  key_ttl_seconds?: number;
   error?: string;
 }
 
@@ -211,6 +215,24 @@ export async function saveAIConfig(cfg: {
 
 export async function clearAIConfig(): Promise<AIConfigResponse> {
   return request("/api/ai/clear", { method: "POST" });
+}
+
+/** 页面关闭/刷新时通知后端立即清除内存 Key（sendBeacon 尽力送达，TTL 兜底） */
+export function clearAIKeyBeacon(): void {
+  if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+    navigator.sendBeacon("/api/ai/key/clear");
+    return;
+  }
+  void fetch("/api/ai/key/clear", { method: "POST", keepalive: true }).catch(() => undefined);
+}
+
+/** 前端心跳：页面仍打开时延长后端内存 Key 存活（失败静默，不影响主流程） */
+export async function keepaliveAI(): Promise<AIConfigResponse | null> {
+  try {
+    return await request("/api/ai/keepalive", { method: "POST" });
+  } catch {
+    return null;
+  }
 }
 
 export async function summarizePreview(content: string): Promise<{ markdown: string }> {
