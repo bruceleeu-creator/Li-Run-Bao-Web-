@@ -44,6 +44,130 @@ _COMPLIANCE_SYSTEM = (
     + compliance_mod.hard_rules_prompt_suffix()
 )
 
+# 出题纪律：内嵌开源法律咨询项目的问诊方法论（2026-08-28 调研）——
+# · 事实锚定/三段论（复述事实→规则差距→判断）：DISC-LawLLM 法律三段论提示（arXiv:2309.11325）、
+#   IRAC 事实先行；ChatLaw 咨询数据「复述事实→引用依据→下判断」回答范式
+# · 一事一问/只问必需/每问说清用途：律所接案问卷（intake questionnaire）设计原则
+# · 信息缺失→澄清问题附选项、必要信息齐备前不下最终结论：Intelligent Legal Assistant
+#   （arXiv:2502.07904）三模块「信息缺失检测→澄清问题与选项生成→综合回答」
+# · 输入必须真实数据非占位符：HanFei self-instruct 提示词（siat-nlp/HanFei）
+# · 禁止离题：ChatLaw 法律咨询数据 meta_instruction 负面清单（PKU-YuanGroup/ChatLaw）
+_QUESTIONING_METHODOLOGY = (
+    "【出题纪律（法律咨询式问诊）】向企业决策者出题时必须遵守：\n"
+    "1) 事实锚定：每道题与每个选项必须先复述「企业数据摘要」中本企业真实存在的"
+    "科目、金额、年份或指标（照抄数字，不改口径不改单位），再就此发问；"
+    "禁止提及数据中不存在的科目、业务或事件。\n"
+    "2) 一事一问、只问必需：一道题只讨论当前发现的一个议题，且该议题必须影响结论；"
+    "不得夹带与当前发现无关的背景问题或通用财税科普。\n"
+    "3) 先事实后提问：题面结构 = 现状数字 → 与对标/红线的差距及不管的后果 → 要决策什么。\n"
+    "4) 选项后果可预期：A/B/C 每项写清「做什么 + 达到什么数字 + 大致影响」，"
+    "选项目标用本企业真实数值推算，让非财务老板看懂选完之后会发生什么。\n"
+    "5) 缺信息就澄清：数据中找不到依据时写明「财报未体现 X，请补充确认」，"
+    "不得在假设上虚构数字推进分析。\n"
+    "6) 不重复问：数据已体现或此前互动已确认的事实不再问，新问题应在其基础上递进。\n"
+    "7) 通用题自检：若把题目中的企业数字与科目名删掉后，该题放到任何企业都成立，"
+    "则该题是无效的离题通用题，必须重写为引用本企业数字的题。"
+)
+
+# 出题锚定校验用的数字片段（支持千分位与小数）
+_NUM_TOKEN_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
+
+
+def _case_number_anchors(data: Optional[FinancialData]) -> set:
+    """提取本案例数字锚点：科目金额、年份、确定性指标值。
+
+    含元→万元/亿元换算与常见舍入形式（AI 常改换单位叙述，如 18200000 写作 1820万）。
+    """
+    anchors: set = set()
+
+    def _add(v) -> None:
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return
+        if v != v:  # NaN 防御
+            return
+        anchors.add(v)
+        anchors.add(round(v, 1))
+        anchors.add(round(v))
+        if abs(v) >= 1000:
+            anchors.add(round(v / 10_000, 2))
+            anchors.add(round(v / 10_000, 1))
+            anchors.add(round(v / 100_000_000, 2))
+
+    if data is None:
+        return anchors
+    for y in data.years or []:
+        try:
+            anchors.add(float(y))
+        except (TypeError, ValueError):
+            continue
+    for table in (data.income_statement, data.balance_sheet, data.account_balances):
+        for series in (table or {}).values():
+            for v in (series or {}).values():
+                _add(v)
+    for y in sorted(data.years or []):
+        try:
+            ind = fin.compute_year_indicators(data, y)
+        except Exception:
+            continue
+        for item in ind.values():
+            if isinstance(item, dict):
+                _add(item.get("value"))
+    return anchors
+
+
+def _case_account_names(data: Optional[FinancialData]) -> set:
+    """案例中真实存在的科目名集合（长度 ≥2 才参与文本匹配）。"""
+    names: set = set()
+    if data is None:
+        return names
+    for table in (data.income_statement, data.balance_sheet, data.account_balances):
+        for name in (table or {}).keys():
+            name = str(name or "").strip()
+            if len(name) >= 2:
+                names.add(name)
+    return names
+
+
+def _text_is_grounded(
+    text: str,
+    data: Optional[FinancialData],
+    finding: Optional[Finding] = None,
+) -> bool:
+    """AI 题面文本是否锚定本案例：命中任一数字锚点（舍入容差）或真实科目名。
+
+    确定性守卫（AI 只出题、锚定由引擎把关）：data 为 None 时无法判定，放行由上层兜底。
+    """
+    if data is None:
+        return True
+    text = str(text or "")
+    if not text.strip():
+        return False
+    anchors = _case_number_anchors(data)
+    if finding is not None:
+        for v in (finding.current_value, finding.target_value):
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            anchors.add(fv)
+            anchors.add(round(fv, 1))
+    for m in _NUM_TOKEN_RE.finditer(text):
+        try:
+            n = float(m.group(0).replace(",", ""))
+        except ValueError:
+            continue
+        if n in anchors:
+            return True
+        for a in anchors:
+            if abs(n - a) <= max(0.05, abs(a) * 0.005):
+                return True
+    for name in _case_account_names(data):
+        if name in text:
+            return True
+    return False
+
 
 class AIEngineError(Exception):
     """AI 引擎错误基类。"""
@@ -362,9 +486,12 @@ class AIEngine:
 
         system_prompt = (
             _COMPLIANCE_SYSTEM
-            + "任务：在规则引擎已有发现之外，继续挖掘经营、税负、费用结构、回款、真实性与合规管理问题。"
+            + _QUESTIONING_METHODOLOGY
+            + "\n任务：在规则引擎已有发现之外，继续挖掘经营、税负、费用结构、回款、真实性与合规管理问题。"
             "优先输出「规则未覆盖」或「可讲清阶段故事」的发现。"
-            "每条发现必须可被给定数字支撑，禁止编造不存在的科目金额。"
+            "每条发现的 fact 必须引用本企业数据中的具体科目金额/年份/指标，"
+            "未锚定本案例数字的发现会被程序直接丢弃。"
+            "禁止编造不存在的科目金额。"
             "category 只能是：税负率 / 成本费用结构 / 真实性风险。"
             "severity 只能是：高 / 中 / 低。"
             "返回 JSON 对象：{\"findings\":[...]}，每项字段："
@@ -418,6 +545,9 @@ class AIEngine:
             finding = self._finding_from_dict(item, default_id=fid)
             if finding is None:
                 continue
+            # 锚定守卫：fact 未引用本案例数字/科目的发现视为通用套话，直接丢弃
+            if not _text_is_grounded(finding.fact, data):
+                continue
             # 选项不足则补全失败 → 跳过该条（调用方可再 generate_options）
             if len(finding.options) != 3:
                 try:
@@ -446,9 +576,12 @@ class AIEngine:
         """
         system_prompt = (
             _COMPLIANCE_SYSTEM
-            + "任务：为一条诊断发现生成互动出题用的 A/B/C 三个可量化选项。"
+            + _QUESTIONING_METHODOLOGY
+            + "\n任务：为一条诊断发现生成互动出题用的 A/B/C 三个可量化选项。"
             "A=积极落地（目标更进取，动作具体），B=分阶段平衡，C=暂维持/仅备查（须提示风险）。"
             "每个选项必须能让非财务老板看懂「选了以后发生什么」。"
+            "选项描述与操作建议必须引用本企业的具体数字或科目"
+            "（未锚定本案例的选项会被程序判定为无效并回退规则选项）。"
             "选项中的费用/成本目标必须遵守：历史费用率对标、金税四期合规、费用增幅匹配营收增速、行业区间。"
             "返回 JSON 数组，每项字段："
             "label,name,description,target_value,est_saving,cost_saving,tax_saving,"
@@ -495,7 +628,17 @@ class AIEngine:
              {"role": "user", "content": user_prompt}],
             max_tokens=OPTIONS_MAX_TOKENS,
         )
-        return self._parse_options_json(content, finding)
+        options = self._parse_options_json(content, finding)
+        # 锚定守卫：选项文本未引用本案例数字/科目 → 抛错，调用方回退规则引擎选项
+        if data is not None:
+            combined = " ".join(
+                f"{o.name} {o.description} {o.action_note}" for o in options
+            )
+            if not _text_is_grounded(combined, data, finding=finding):
+                raise AIEngineError(
+                    "AI 选项未锚定本企业数据（未引用案例数字/科目），已回退规则选项"
+                )
+        return options
 
     def enrich_interaction_question(
         self,
@@ -516,9 +659,12 @@ class AIEngine:
         )
         system_prompt = (
             _COMPLIANCE_SYSTEM
-            + "任务：把诊断发现改写成互动环节的「出题文案」。"
+            + _QUESTIONING_METHODOLOGY
+            + "\n任务：把诊断发现改写成互动环节的「出题文案」。"
             "返回 JSON 对象：{question_title, plain_fact, why_it_matters, suggestion_prompt}。"
-            "plain_fact 用小白话讲清现状数字；why_it_matters 讲清楚不管会怎样；"
+            "plain_fact 用小白话讲清现状，必须保留原事实中的企业数字与科目名"
+            "（未锚定本案例的题面会被程序判定无效并保留原题）；"
+            "why_it_matters 讲清楚不管会怎样；"
             "suggestion_prompt 引导用户在 A/B/C 中选择，并允许补充战略意图。"
             "不要输出选项本身。"
         )
@@ -527,6 +673,11 @@ class AIEngine:
             f"建议：{finding.suggestion}\n当前值：{finding.current_value}{finding.unit}\n"
             f"选项概要：" + "；".join(f"{o.label}.{o.name}" for o in options)
         )
+        if data is not None:
+            user_prompt += (
+                "\n【企业数据摘要】\n"
+                + self.compact_financial_context(data, max_ocr_chars=800)
+            )
         if strategy_notes:
             user_prompt += "\n用户意图：" + "；".join(strategy_notes[-3:])
         content = self._chat(
@@ -541,6 +692,10 @@ class AIEngine:
         why = str(payload.get("why_it_matters") or "").strip()
         suggest = str(payload.get("suggestion_prompt") or finding.suggestion).strip()
         qtitle = str(payload.get("question_title") or finding.title).strip()
+        # 锚定守卫：改写后的题面必须仍引用本案例数字/科目，否则保留原题
+        combined = f"{qtitle} {plain} {why} {suggest}"
+        if not _text_is_grounded(combined, data, finding=finding):
+            raise AIEngineError("AI 题面未锚定本企业数据，保留原题")
         fact = plain if not why else f"{plain} 影响：{why}"
         # 不改 id/category/数值字段，只优化可读文案与选项
         finding.title = qtitle or finding.title

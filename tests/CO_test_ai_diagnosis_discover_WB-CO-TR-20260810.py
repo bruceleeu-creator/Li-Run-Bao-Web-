@@ -89,7 +89,8 @@ def test_discover_findings_merges_mock(monkeypatch):
     payload = """
     {"findings":[
       {"id":"AI_CASH","title":"利润现金背离","category":"成本费用结构","severity":"高",
-       "fact":"利润升应收升","benchmark":"经营质量","suggestion":"抓回款",
+       "fact":"应收账款 2024=35,000,000 元，占营收 80,000,000 元的 43.75%，较 2023=20,000,000 元大幅上升",
+       "benchmark":"经营质量","suggestion":"抓回款",
        "current_value":1,"target_value":0,"unit":"%",
        "options":[
          {"label":"A","name":"A1","description":"d","target_value":0,"est_saving":0,"feasibility":"中","risk_level":"低"},

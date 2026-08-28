@@ -2523,13 +2523,19 @@ def generate_monthly_questions(
         return [], "第一稿快照缺少非零费用行"
 
     prompt = (
-        "根据下面的年度费用预算行目录与企业信息，生成 4~6 个用于「月度拆分方向」的澄清问题。\n"
+        "你是预算编制顾问，正按法律咨询式问诊纪律向企业出澄清问题：每个问题必须锚定"
+        "下面的费用行目录与企业信息，禁止提与所给费用科目无关的通用问题。\n"
         "只返回 JSON 对象：{\"questions\":[{\"id\":\"q_xxx\",\"type\":\"single\"或\"text\","
         "\"title\":\"...\",\"options\":[\"...\"],\"default\":\"...\",\"placeholder\":\"...\"}]}。\n"
         "要求：id 用英文小写加下划线且不重复；single 题至少 2 个选项且 default 必须是选项之一；"
         "text 题 default 为空串、placeholder 给填写示例；问题必须覆盖：收入季节性、"
         "人员薪酬与年终奖节奏、房租等固定费用是否平摊、广宣投放节奏、一次性大额支出"
-        "（格式：月份+金额+费用项目）；题目贴合给出的费用科目构成；只输出 JSON。\n"
+        "（格式：月份+金额+费用项目）。\n"
+        "出题纪律：①每题 title 必须点名费用行目录中的具体费用项目或科目"
+        "（如「广宣费」「工资薪金」，金额照抄目录数字）；②一事一问，一题只澄清一个科目"
+        "的节奏；③若把题目中的费用项目名与数字删掉后该题放到任何公司都成立，该题不合格，"
+        "须重写；④目录中没有的费用类型不要问。\n"
+        "只输出 JSON。\n"
         f"企业信息：{json.dumps(hints or {}, ensure_ascii=False)}\n"
         f"费用行目录：{json.dumps(catalog, ensure_ascii=False)}"
     )
@@ -2547,6 +2553,13 @@ def generate_monthly_questions(
     raw = parsed.get("questions")
     if not isinstance(raw, list) or not (4 <= len(raw) <= 6):
         return [], "AI 问题数量非法（须 4~6 题）"
+    # 锚定词集合：费用行目录中的科目名与费用项目名（长度 ≥2 才参与匹配）
+    anchor_names = set()
+    for r in catalog:
+        for key in ("expense_name", "subject"):
+            token = str(r.get(key) or "").strip()
+            if len(token) >= 2:
+                anchor_names.add(token)
     questions: list[dict] = []
     seen_ids: set = set()
     for item in raw:
@@ -2559,6 +2572,9 @@ def generate_monthly_questions(
             return [], "AI 问题 id 非法或重复"
         if qtype not in ("single", "text") or not title:
             return [], "AI 问题 type/title 非法"
+        # 锚定守卫：title 未点名目录中任何具体费用项目/科目 → 视为通用题丢弃
+        if anchor_names and not any(name in title for name in anchor_names):
+            continue
         default = str(item.get("default") or "").strip()
         options = [str(o) for o in (item.get("options") or []) if str(o).strip()]
         if qtype == "single":
@@ -2574,6 +2590,8 @@ def generate_monthly_questions(
             "placeholder": str(item.get("placeholder") or ""),
         })
         seen_ids.add(qid)
+    if len(questions) < 4:
+        return [], "AI 问题未锚定费用科目（有效题不足 4 题），回退规则题库"
     return questions, ""
 
 
