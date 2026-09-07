@@ -100,7 +100,7 @@ def test_text_grounded_by_finding_values():
 
 _OPTIONS_GROUNDED = """[
   {"label":"A","name":"压降管理费用","description":"管理费用从 6,000,000 元压降至 5,000,000 元","target_value":5000000,"est_saving":0,"feasibility":"中","risk_level":"低","action_note":"按预算执行"},
-  {"label":"B","name":"分阶段压降","description":"先降至 5,500,000 元再观察","target_value":5500000,"est_saving":0,"feasibility":"高","risk_level":"低"},
+  {"label":"B","name":"分阶段压降","description":"管理费用先降至 5,500,000 元（次年营收 80,000,000 元口径）再观察","target_value":5500000,"est_saving":0,"feasibility":"高","risk_level":"低"},
   {"label":"C","name":"暂维持","description":"维持 6,000,000 元并加强审批","target_value":6000000,"est_saving":0,"feasibility":"高","risk_level":"中"}
 ]"""
 
@@ -108,6 +108,13 @@ _OPTIONS_GENERIC = """[
   {"label":"A","name":"积极优化","description":"全面优化费用结构提升效益","target_value":1,"est_saving":0,"feasibility":"中","risk_level":"低"},
   {"label":"B","name":"平衡推进","description":"分阶段推进优化","target_value":1,"est_saving":0,"feasibility":"高","risk_level":"低"},
   {"label":"C","name":"暂维持","description":"维持现状关注风险","target_value":1,"est_saving":0,"feasibility":"高","risk_level":"中"}
+]"""
+
+# v32：A/C 锚定而 B 是套话——逐选项守卫下必须整组拒绝
+_OPTIONS_MIXED = """[
+  {"label":"A","name":"压降管理费用","description":"管理费用从 6,000,000 元压降至 5,000,000 元","target_value":5000000,"est_saving":0,"feasibility":"中","risk_level":"低","action_note":"按预算执行"},
+  {"label":"B","name":"平衡推进","description":"分阶段推进优化","target_value":1,"est_saving":0,"feasibility":"高","risk_level":"低"},
+  {"label":"C","name":"暂维持","description":"维持 6,000,000 元并加强审批","target_value":6000000,"est_saving":0,"feasibility":"高","risk_level":"中"}
 ]"""
 
 
@@ -145,6 +152,30 @@ def test_generate_options_without_data_skips_gate(monkeypatch):
     assert len(options) == 3
 
 
+# ── v32 逐选项锚定守卫 ──────────────────────────────────────────
+
+
+def test_generate_options_mixed_grounding_rejected(monkeypatch):
+    """A/C 锚定而 B 是套话 → 逐选项守卫必须整组拒绝（不允许套话选项混入）。"""
+    engine = AIEngine(base_url="https://x", api_key="k", model="m")
+    monkeypatch.setattr(engine, "_chat", lambda messages, max_tokens=400: _OPTIONS_MIXED)
+    with pytest.raises(AIEngineError, match="选项 B 未锚定"):
+        engine.generate_options(_finding(), data=_sample_data())
+
+
+def test_parse_options_normalizes_risk_level(monkeypatch):
+    """AI 返回 risk_level 变体（偏高/较低）须归一为 高/低，防落地性扣分漏判。"""
+    payload = """[
+      {"label":"A","name":"积极","description":"管理费用压降至 5,000,000 元","target_value":5000000,"est_saving":0,"risk_level":"偏高"},
+      {"label":"B","name":"分阶段","description":"管理费用先降至 5,500,000 元","target_value":5500000,"est_saving":0,"risk_level":"较低"},
+      {"label":"C","name":"维持","description":"维持 6,000,000 元现状","target_value":6000000,"est_saving":0,"risk_level":"中等"}
+    ]"""
+    engine = AIEngine(base_url="https://x", api_key="k", model="m")
+    monkeypatch.setattr(engine, "_chat", lambda messages, max_tokens=400: payload)
+    options = engine.generate_options(_finding())  # data=None 跳守卫，只测解析
+    assert [o.risk_level for o in options] == ["高", "低", "中"]
+
+
 # ── discover_findings 锚定丢弃 ──────────────────────────────────
 
 
@@ -175,6 +206,55 @@ def test_discover_drops_ungrounded_keeps_grounded(monkeypatch):
     monkeypatch.setattr(engine, "_chat", lambda messages, max_tokens=400: payload)
     extra = engine.discover_findings(_sample_data(), existing=[])
     assert [f.id for f in extra] == ["AI_AR"]
+
+
+def test_discover_value_guards(monkeypatch):
+    """v32 数值校验：假科目置空、越锚金额置 0、|est| 超营收的选项分栏清零。"""
+    engine = AIEngine(base_url="https://x", api_key="k", model="m")
+    payload = """
+    {"findings":[
+      {"id":"AI_GUARD","title":"管理费用异常","category":"成本费用结构","severity":"中",
+       "fact":"管理费用 2024=6,000,000 元，占营收 7.5%",
+       "benchmark":"行业对标","suggestion":"核查",
+       "current_value":999888777,"target_value":0,"unit":"元","account":"不存在的火星科目",
+       "options":[
+         {"label":"A","name":"核查","description":"核查管理费用 6,000,000 元构成","target_value":0,"est_saving":1000000000,"cost_saving":1000000000,"risk_level":"低"},
+         {"label":"B","name":"分阶段","description":"管理费用分阶段核查","target_value":0,"est_saving":0,"risk_level":"低"},
+         {"label":"C","name":"维持","description":"维持 6,000,000 元并记录","target_value":0,"est_saving":0,"risk_level":"中"}
+       ]}
+    ]}
+    """
+    monkeypatch.setattr(engine, "_chat", lambda messages, max_tokens=400: payload)
+    extra = engine.discover_findings(_sample_data(), existing=[])
+    assert len(extra) == 1
+    f = extra[0]
+    assert f.account_key == ""  # 假科目被置空
+    assert f.current_value == 0.0  # 越锚金额（元）置 0
+    opt_a = next(o for o in f.options if o.label == "A")
+    assert opt_a.est_saving == 0.0  # |est| > 营收（8000 万）→ 清零
+    assert opt_a.cost_saving == 0.0
+
+
+def test_discover_options_omitted_filled_by_generate(monkeypatch):
+    """v32 schema 减负：发现不带 options 时走逐条补题路径，不整条丢弃。"""
+    engine = AIEngine(base_url="https://x", api_key="k", model="m")
+    discovery_payload = (
+        '{"findings":[{"id":"AI_MGMT","title":"管理费用偏高","category":"成本费用结构",'
+        '"severity":"中","fact":"管理费用 2024=6,000,000 元占营收 7.5%",'
+        '"benchmark":"行业 3%~5%","suggestion":"压降","current_value":7.5,'
+        '"target_value":5.0,"unit":"%","account":"管理费用"}]}'
+    )
+    calls = iter([discovery_payload, _OPTIONS_GROUNDED])
+
+    def _fake_chat(messages, max_tokens=400):
+        return next(calls)
+
+    monkeypatch.setattr(engine, "_chat", _fake_chat)
+    extra = engine.discover_findings(_sample_data(), existing=[])
+    assert len(extra) == 1
+    f = extra[0]
+    assert f.account_key == "管理费用"  # 真实科目保留
+    assert [o.label for o in f.options] == ["A", "B", "C"]  # 补题成功
 
 
 # ── enrich_interaction_question 锚定守卫 ─────────────────────────

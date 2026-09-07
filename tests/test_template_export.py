@@ -162,18 +162,23 @@ def test_action_pack_consulting_f_h_formulas(sample_session, tmp_path):
 
 
 def test_action_pack_empty_draft_no_circular_reference(tmp_path):
-    """P0-4：空草稿时概览公式为 0（无循环引用）。"""
+    """P0-4：空草稿时概览公式为 0（无循环引用）。
+
+    v32 注：税金及附加取 36,000 保证零发现（360,000 会触发低严重度 VAT_HIGH，
+    被低价值自动处理生成第二稿条目，不再是「空草稿」场景）。
+    """
     raw = {
         "company_name": "正常公司", "industry": "制造业", "years": [2023],
         "income_statement": {
             "营业收入": {2023: 10_000_000}, "营业成本": {2023: 7_000_000},
-            "税金及附加": {2023: 360_000}, "研发费用": {2023: 500_000},
+            "税金及附加": {2023: 36_000}, "研发费用": {2023: 500_000},
             "所得税费用": {2023: 250_000}, "净利润": {2023: 750_000},
         },
         "balance_sheet": {}, "account_balances": {"业务招待费": 30_000, "咨询服务费": 100_000},
     }
     data = pr.parse_financial_dict(raw)
     result = diag.diagnose(data)
+    assert len(result.findings) == 0
     sess = iv.start_session(data, result)
     # 无发现 → 直接到 DRAFT2/CONFIRMATION
     iv.confirm(sess, user_confirmed=True)

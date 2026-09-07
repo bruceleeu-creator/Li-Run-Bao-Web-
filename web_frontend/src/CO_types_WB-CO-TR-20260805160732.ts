@@ -249,6 +249,8 @@ export interface DiagnosisFinding {
   target_value: number;
   unit: string;
   status: string;
+  /** v32：发现挂接的科目名（第二稿趋势分析用；指标类发现为空） */
+  account_key?: string;
   /** 该发现的 A/B/C 选项是否由 AI 增强 */
   ai_enhanced: boolean;
   /** rule | ai | rule+ai */
@@ -291,6 +293,8 @@ export interface InteractionDecision {
   change_pct: string;
   action_detail: string;
   cautions: string;
+  /** v32：程序自动处理（低价值发现按暂维持），非用户决策 */
+  auto?: boolean;
 }
 
 export interface Draft2Entry {
@@ -317,9 +321,14 @@ export interface Draft2Entry {
 export interface InteractionState {
   state: "IDLE" | "FINDING_LOOP" | "DRAFT2" | "CONFIRMATION" | "FINAL";
   current_index: number | null;
+  /** 本次需要互动答题的发现数（低价值发现已自动处理，不计入） */
   total: number;
+  /** 全部发现数（含自动处理项） */
+  findings_total?: number;
   current_finding: DiagnosisFinding | null;
   decisions: InteractionDecision[];
+  /** v32：低价值发现自动按「暂维持」处理的概要 */
+  auto_deferred?: { finding_id: string; finding_title: string; est_saving: number }[];
   draft2: Draft2Entry[];
   feasibility_score: number;
   feasibility_breakdown: string[];

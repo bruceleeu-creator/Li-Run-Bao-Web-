@@ -81,6 +81,7 @@ def _finding_to_dict(finding) -> dict:
         "target_value": finding.target_value,
         "unit": finding.unit,
         "status": finding.status,
+        "account_key": getattr(finding, "account_key", ""),
         "options": [_option_to_dict(o) for o in finding.options],
     }
 
@@ -101,6 +102,7 @@ def _decision_to_dict(d) -> dict:
         "change_pct": d.change_pct,
         "action_detail": d.action_detail,
         "cautions": d.cautions,
+        "auto": bool(getattr(d, "auto", False)),
     }
 
 
@@ -131,14 +133,28 @@ def _state_payload() -> dict:
     global _sess
     sess = _sess
     if sess is None:
-        return {"state": "IDLE", "current_finding": None, "decisions": [], "draft2": []}
+        return {
+            "state": "IDLE", "current_finding": None, "decisions": [], "draft2": [],
+            "auto_deferred": [],
+        }
     current = sess.current_finding
     return {
         "state": sess.state,
         "current_index": sess.current_finding_index if current else None,
-        "total": len(sess.diagnosis.findings),
+        # v32：total=本次需要互动答题的发现数（低价值发现已自动处理，不计入）
+        "total": len(sess.interactive_ids),
+        "findings_total": len(sess.diagnosis.findings or []),
         "current_finding": _finding_to_dict(current) if current else None,
         "decisions": [_decision_to_dict(d) for d in sess.decisions],
+        # v32：低价值发现自动按「暂维持」处理的概要（前端提示条渲染）
+        "auto_deferred": [
+            {
+                "finding_id": d.finding_id,
+                "finding_title": d.finding_title,
+                "est_saving": d.est_saving,
+            }
+            for d in sess.auto_decisions
+        ],
         "draft2": [_draft2_entry_to_dict(e) for e in sess.draft2],
         "feasibility_score": sess.feasibility_score,
         "feasibility_breakdown": list(sess.feasibility_breakdown),
@@ -186,6 +202,7 @@ def _diagnosis_from_db(data) -> Optional[diag_mod.DiagnosisResult]:
             target_value=float(f.get("target_value", 0.0) or 0.0),
             unit=f.get("unit", "%"),
             status=f.get("status", "pending"),
+            account_key=f.get("account_key", "") or "",
             options=options,
         ))
     return diag_mod.DiagnosisResult(

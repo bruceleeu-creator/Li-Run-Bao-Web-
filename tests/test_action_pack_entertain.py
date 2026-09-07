@@ -170,18 +170,23 @@ def test_python_recalc_h_and_i_change_with_e(exported_workbook):
 # ── 测试 5：空草稿无循环引用 ────────────────────────────────────────────
 
 def test_empty_draft_overview_no_circular_reference(tmp_path):
-    """空草稿时方案概览的「总净影响」应为 0，不引用行动 Sheet。"""
+    """空草稿时方案概览的「总净影响」应为 0，不引用行动 Sheet。
+
+    v32 注：税金及附加取 36,000 保证零发现（360,000 会触发低严重度 VAT_HIGH，
+    被低价值自动处理生成第二稿条目，不再是「空草稿」场景）。
+    """
     raw = {
         "company_name": "正常公司", "industry": "制造业", "years": [2023],
         "income_statement": {
             "营业收入": {2023: 10_000_000}, "营业成本": {2023: 7_000_000},
-            "税金及附加": {2023: 360_000}, "研发费用": {2023: 500_000},
+            "税金及附加": {2023: 36_000}, "研发费用": {2023: 500_000},
             "所得税费用": {2023: 250_000}, "净利润": {2023: 750_000},
         },
         "balance_sheet": {}, "account_balances": {"业务招待费": 30_000, "咨询服务费": 100_000},
     }
     data = pr.parse_financial_dict(raw)
     result = diag.diagnose(data)
+    assert len(result.findings) == 0
     sess = iv.start_session(data, result)
     iv.confirm(sess, user_confirmed=True)
     assert len(sess.draft2) == 0

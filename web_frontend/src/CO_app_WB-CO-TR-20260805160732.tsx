@@ -2002,6 +2002,7 @@ function InteractionPage({
   }
 
   const cur = state?.current_finding ?? null;
+  const autoDeferred = state?.auto_deferred ?? [];
 
   return (
     <>
@@ -2009,6 +2010,12 @@ function InteractionPage({
         <h2 className="panel__title">A/B/C 互动</h2>
         {error ? <div className="status status--error" role="alert">{error}</div> : null}
         {state?.ai_fallback_message ? <p className="panel__note">{state.ai_fallback_message}</p> : null}
+        {autoDeferred.length > 0 ? (
+          <p className="panel__note">
+            已自动按「暂维持」处理 {autoDeferred.length} 项低影响发现
+            （{autoDeferred.map((d) => d.finding_title).join("、")}），明细见第二稿；本次决策已聚焦大额问题。
+          </p>
+        ) : null}
 
         {state?.state === "FINDING_LOOP" && cur ? (
           <>
@@ -2031,9 +2038,9 @@ function InteractionPage({
               <div className="choice-card">
                 <h3>请选择落地路径（A / B / C）</h3>
                 <div className="choice-row">
-                  <span>A · 默认落地路径</span>
-                  <span>B · 稳妥路径</span>
-                  <span>C · 激进路径</span>
+                  <span>A · 积极落地</span>
+                  <span>B · 分阶段推进</span>
+                  <span>C · 暂维持 · 防风险</span>
                 </div>
               </div>
               <div className="finding-options">

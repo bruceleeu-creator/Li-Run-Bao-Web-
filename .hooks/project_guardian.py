@@ -78,6 +78,7 @@ EXPECTED_MODULES = {
               "test_pipeline_phase_a.py",
               "test_case_manifest_phase_b.py",
               "test_reconciliation_audit.py",
+              "CO_test_question_grounding_WB-CO-TR-20260828.py",
               ],
     "web_backend": ["__init__.py", "CO_app_WB-CO-TR-20260805160732.py",
                     "CO_run_WB-CO-TR-20260805160732.py",

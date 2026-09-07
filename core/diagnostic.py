@@ -103,6 +103,9 @@ class Finding:
     target_value: float = 0.0
     unit: str = "%"  # 默认百分比；金额用 "元"
     status: str = "pending"  # pending / accepted / deferred
+    # v32：发现挂接的科目名（真实科目，见 account_balances/income_statement）。
+    # 用于第二稿按科目多年序列生成真实环比同比趋势；指标类发现留空。
+    account_key: str = ""
 
 
 @dataclass
@@ -596,6 +599,7 @@ def _check_rd_missing(data: FinancialData, benchmark: Dict) -> Optional[Finding]
             current_value=rd_ratio,
             target_value=benchmark["rd_expense_ratio"]["median"],
             unit="%",
+            account_key="研发费用",
         )
     return None
 
@@ -634,6 +638,7 @@ def _check_rd_low(data: FinancialData, benchmark: Dict) -> Optional[Finding]:
         current_value=rd_ratio,
         target_value=item["median"],
         unit="%",
+        account_key="研发费用",
     )
 
 
@@ -679,6 +684,7 @@ def _check_entertainment_excess(data: FinancialData) -> Optional[Finding]:
             current_value=ent,
             target_value=revenue * ENTERTAIN_REVENUE_RATIO / ENTERTAIN_DEDUCT_RATIO,
             unit="元",
+            account_key="业务招待费",
         )
     return None
 
@@ -714,6 +720,7 @@ def _check_consulting_high(data: FinancialData) -> Optional[Finding]:
             current_value=consult,
             target_value=revenue * 0.02,
             unit="元",
+            account_key="咨询服务费",
         )
     return None
 
@@ -1118,6 +1125,7 @@ def _check_expense_ratio_high(
         current_value=ratio,
         target_value=item["median"],
         unit="%",
+        account_key=income_account,
     )
 
 
@@ -1170,6 +1178,7 @@ def _check_welfare_underused(data: FinancialData) -> Optional[Finding]:
         current_value=welfare,
         target_value=target_a,
         unit="元",
+        account_key="福利费",
     )
 
 
@@ -1217,6 +1226,7 @@ def _check_edu_underused(data: FinancialData) -> Optional[Finding]:
         current_value=edu,
         target_value=target_a,
         unit="元",
+        account_key="教育经费",
     )
 
 
@@ -1262,6 +1272,7 @@ def _check_ad_expense_high(data: FinancialData) -> Optional[Finding]:
         current_value=ad,
         target_value=cap,
         unit="元",
+        account_key="广告宣传费",
     )
 
 
@@ -1307,6 +1318,7 @@ def _check_ar_high(data: FinancialData) -> Optional[Finding]:
         current_value=ratio * 100.0,
         target_value=30.0,
         unit="%",
+        account_key="应收账款",
     )
 
 
@@ -1388,6 +1400,7 @@ def _check_revenue_decline(data: FinancialData) -> Optional[Finding]:
         current_value=gr,
         target_value=0.0,
         unit="%",
+        account_key="营业收入",
     )
 
 
@@ -1422,6 +1435,7 @@ def _check_profit_decline(data: FinancialData) -> Optional[Finding]:
         current_value=gr,
         target_value=0.0,
         unit="%",
+        account_key="净利润",
     )
 
 
@@ -1520,6 +1534,7 @@ def _check_ar_growing_faster(data: FinancialData) -> Optional[Finding]:
         current_value=ar_gr,
         target_value=rev_gr,
         unit="%",
+        account_key="应收账款",
     )
 
 

@@ -58,6 +58,7 @@ def _finding_to_dict(finding, ai_enhanced: bool = False, source: str = "rule") -
         "target_value": finding.target_value,
         "unit": finding.unit,
         "status": finding.status,
+        "account_key": getattr(finding, "account_key", ""),
         "ai_enhanced": ai_enhanced,
         "source": source,  # rule | ai | rule+ai
         "options": [_option_to_dict(o) for o in finding.options],

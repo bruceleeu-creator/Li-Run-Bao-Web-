@@ -273,3 +273,26 @@ def test_diagnosis_findings_sorted_low_medium_high():
     levels = [rank.get(f["severity"], 9) for f in findings]
     assert levels == sorted(levels), f"严重度应按 低→中→高 排序，实际: {[f['severity'] for f in findings]}"
 
+
+def test_interaction_starts_with_highest_risk():
+    """v32：互动首题 = 最高风险发现（重点先问）；state 携带 auto_deferred 契约键。"""
+    _load_sample()
+    r = CLIENT.post("/api/diagnosis/run")
+    assert r.status_code == 200, r.text
+    sev_rank = {"低": [], "中": [], "高": []}
+    for f in r.json()["findings"]:
+        sev_rank.setdefault(f["severity"], []).append(f["title"])
+
+    r2 = CLIENT.post("/api/interaction/start")
+    assert r2.status_code == 200, r2.text
+    state = r2.json()
+    cur = state.get("current_finding")
+    assert cur is not None, "样例应有待互动发现"
+    highest = "高" if sev_rank.get("高") else ("中" if sev_rank.get("中") else "低")
+    assert cur["severity"] == highest, (
+        f"互动首题应为最高风险（{highest}），实际首题：{cur['severity']} {cur['title']}"
+    )
+    # v32 契约键：互动题数 total 与自动处理概要 auto_deferred 必在
+    assert isinstance(state.get("total"), int) and state["total"] >= 1
+    assert isinstance(state.get("auto_deferred"), list)
+

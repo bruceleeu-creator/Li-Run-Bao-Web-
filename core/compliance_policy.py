@@ -54,6 +54,38 @@ def sort_findings_by_severity(findings: list) -> list:
     return sorted(findings, key=lambda f: severity_sort_key(getattr(f, "severity", "") or (f.get("severity") if isinstance(f, dict) else "")))
 
 
+def finding_money_key(f) -> float:
+    """发现的金额影响键：取选项中最大正 est_saving（元）。无选项/全负返回 0。
+
+    用于互动提问的金额降序——大额异常先问，小额噪音靠后。
+    """
+    best = 0.0
+    for opt in getattr(f, "options", None) or []:
+        try:
+            v = float(getattr(opt, "est_saving", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if v > best:
+            best = v
+    return best
+
+
+def sort_findings_for_interaction(findings: list) -> list:
+    """互动提问顺序（v32）：高→中→低风险，同级按预计节税金额降序。
+
+    与 sort_findings_by_severity（诊断页低→高展示）方向相反：诊断页分区展示
+    保持原契约，互动决策把最关键的高危大额发现放在最前面，避免用户疲劳后
+    一键全选 A 稀释重点决策。
+    """
+    def _key(f):
+        return (
+            -severity_sort_key(getattr(f, "severity", "") or (f.get("severity") if isinstance(f, dict) else "")),
+            -finding_money_key(f),
+        )
+
+    return sorted(findings, key=_key)
+
+
 def historical_fee_ratios(data: FinancialData) -> Dict[str, Any]:
     """历史成本费用占营收比例（按年、分销管研财）。"""
     years = sorted(data.years or [])

@@ -66,7 +66,11 @@ _QUESTIONING_METHODOLOGY = (
     "不得在假设上虚构数字推进分析。\n"
     "6) 不重复问：数据已体现或此前互动已确认的事实不再问，新问题应在其基础上递进。\n"
     "7) 通用题自检：若把题目中的企业数字与科目名删掉后，该题放到任何企业都成立，"
-    "则该题是无效的离题通用题，必须重写为引用本企业数字的题。"
+    "则该题是无效的离题通用题，必须重写为引用本企业数字的题。\n"
+    "8) 选项逐项自检（2026-09-07 增补）：A/B/C 三个选项每一个都必须独立引用"
+    "本企业的数字或科目名——把任一选项中的企业数字与科目名删掉后若该选项"
+    "放到任何企业都成立，则该选项是无效套话，必须重写；一组选项中只要有一个"
+    "套话选项，整组会被程序丢弃回退规则选项。"
 )
 
 # 出题锚定校验用的数字片段（支持千分位与小数）
@@ -489,17 +493,19 @@ class AIEngine:
             + _QUESTIONING_METHODOLOGY
             + "\n任务：在规则引擎已有发现之外，继续挖掘经营、税负、费用结构、回款、真实性与合规管理问题。"
             "优先输出「规则未覆盖」或「可讲清阶段故事」的发现。"
-            "每条发现的 fact 必须引用本企业数据中的具体科目金额/年份/指标，"
+            "每条发现的 fact 第一句必须按「{科目名}{年份}为{金额}元」格式原值复述"
+            "（科目与数字照抄企业数据摘要，不改口径不改单位），之后再写对标差距；"
             "未锚定本案例数字的发现会被程序直接丢弃。"
             "禁止编造不存在的科目金额。"
             "category 只能是：税负率 / 成本费用结构 / 真实性风险。"
             "severity 只能是：高 / 中 / 低。"
             "返回 JSON 对象：{\"findings\":[...]}，每项字段："
             "id,title,category,severity,fact,benchmark,suggestion,"
-            "current_value,target_value,unit,"
-            "options:[{label,name,description,target_value,est_saving,cost_saving,"
-            "tax_saving,tax_impact,feasibility,risk_level,action_note}]。"
-            "options 必须恰好 A/B/C 三项：A 积极落地、B 分阶段、C 暂维持/备查。"
+            "current_value,target_value,unit,account。"
+            "account 为该发现对应的科目名（可选，必须是数据摘要中真实存在的科目名，"
+            "非真实科目会被程序置空）。\n"
+            "options 字段建议省略（系统会逐条另行生成），以优先保证发现清单完整输出、"
+            "避免超长截断；如确要提供必须恰好 A/B/C 三项：A 积极落地、B 分阶段、C 暂维持/备查。"
             f"最多 {max_new} 条；id 使用大写蛇形且以 AI_ 开头（如 AI_CASH_PRESSURE）。"
         )
         user_prompt = (
@@ -520,6 +526,17 @@ class AIEngine:
         )
         raw_items = self._parse_findings_payload(content)
         findings: List[Finding] = []
+        # v32 校验原料：案例数字锚点、真实科目名、营收上限（est_saving 合理性）
+        number_anchors = _case_number_anchors(data) if data is not None else set()
+        real_accounts = _case_account_names(data) if data is not None else set()
+        latest_rev = 0.0
+        if data is not None:
+            years_sorted = sorted(data.years or [])
+            if years_sorted:
+                latest_rev = float(
+                    (data.income_statement.get("营业收入", {}) or {})
+                    .get(years_sorted[-1], 0.0) or 0.0
+                )
         for item in raw_items:
             if len(findings) >= max_new:
                 break
@@ -545,6 +562,27 @@ class AIEngine:
             finding = self._finding_from_dict(item, default_id=fid)
             if finding is None:
                 continue
+            # v32 account 挂接：须为真实科目名，否则置空（不整条丢弃，fact 守卫仍在）
+            account = str(item.get("account", "") or "").strip()
+            if account and account in real_accounts:
+                finding.account_key = account
+            # v32 数值校验：金额型 current_value 必须命中案例锚点（容差 0.5%），
+            # AI 编造的金额直接置 0，防污染第二稿与报告金额汇总
+            if finding.unit == "元" and finding.current_value != 0 and number_anchors:
+                cur_v = abs(finding.current_value)
+                if not any(
+                    abs(cur_v - abs(a)) <= max(0.05, cur_v * 0.005)
+                    for a in number_anchors
+                ):
+                    finding.current_value = 0.0
+            # v32 est_saving 合理性：|净影响| 超过营收 → 明显编造，选项分栏金额一并清零
+            if latest_rev > 0:
+                for opt in finding.options:
+                    if abs(opt.est_saving) > latest_rev:
+                        opt.est_saving = 0.0
+                        opt.cost_saving = 0.0
+                        opt.tax_saving = 0.0
+                        opt.tax_impact = 0.0
             # 锚定守卫：fact 未引用本案例数字/科目的发现视为通用套话，直接丢弃
             if not _text_is_grounded(finding.fact, data):
                 continue
@@ -580,8 +618,8 @@ class AIEngine:
             + "\n任务：为一条诊断发现生成互动出题用的 A/B/C 三个可量化选项。"
             "A=积极落地（目标更进取，动作具体），B=分阶段平衡，C=暂维持/仅备查（须提示风险）。"
             "每个选项必须能让非财务老板看懂「选了以后发生什么」。"
-            "选项描述与操作建议必须引用本企业的具体数字或科目"
-            "（未锚定本案例的选项会被程序判定为无效并回退规则选项）。"
+            "A/B/C 三个选项每一个都必须独立引用本企业的具体数字或科目"
+            "——任一选项未锚定，整组会被程序判定无效并回退规则选项。"
             "选项中的费用/成本目标必须遵守：历史费用率对标、金税四期合规、费用增幅匹配营收增速、行业区间。"
             "返回 JSON 数组，每项字段："
             "label,name,description,target_value,est_saving,cost_saving,tax_saving,"
@@ -629,15 +667,17 @@ class AIEngine:
             max_tokens=OPTIONS_MAX_TOKENS,
         )
         options = self._parse_options_json(content, finding)
-        # 锚定守卫：选项文本未引用本案例数字/科目 → 抛错，调用方回退规则引擎选项
+        # 锚定守卫（v32 逐选项）：每个选项必须独立锚定本案例数字/科目，
+        # 任一选项是通用套话 → 整组抛错，调用方回退规则引擎选项
+        # （防止"仅 A 锚定、B/C 套话"混入互动）
         if data is not None:
-            combined = " ".join(
-                f"{o.name} {o.description} {o.action_note}" for o in options
-            )
-            if not _text_is_grounded(combined, data, finding=finding):
-                raise AIEngineError(
-                    "AI 选项未锚定本企业数据（未引用案例数字/科目），已回退规则选项"
-                )
+            for o in options:
+                opt_text = f"{o.name} {o.description} {o.action_note}"
+                if not _text_is_grounded(opt_text, data, finding=finding):
+                    raise AIEngineError(
+                        f"AI 选项 {o.label} 未锚定本企业数据（未引用案例数字/科目），"
+                        "整组已回退规则选项"
+                    )
         return options
 
     def enrich_interaction_question(
@@ -884,7 +924,7 @@ class AIEngine:
                 tax_saving=tax_s,
                 tax_impact=tax_i,
                 feasibility=str(item.get("feasibility", "中")).strip() or "中",
-                risk_level=str(item.get("risk_level", "低")).strip() or "低",
+                risk_level=AIEngine._normalize_risk(item.get("risk_level", "低")),
                 action_note=str(item.get("action_note", "")).strip(),
                 deduction_rate=AIEngine._safe_float(item.get("deduction_rate"), 0.0),
             ))

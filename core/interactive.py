@@ -33,6 +33,10 @@ FEASIBILITY_THRESHOLD = 95.0
 HIGH_RISK_PENALTY = 12.0
 MEDIUM_RISK_PENALTY = 4.0
 
+# v32 低价值发现自动处理门槛：severity==低 且 最大预计影响 < max(绝对下限, 最新年营收×该比例)
+LOW_VALUE_ABS_FLOOR = 1000.0  # 元
+LOW_VALUE_REVENUE_RATIO = 0.0005  # 营收的 0.05%
+
 
 @dataclass
 class Decision:
@@ -52,6 +56,7 @@ class Decision:
     change_pct: float = 0.0  # 变动百分比
     action_detail: str = ""  # 操作细节
     cautions: str = ""  # 注意事项
+    auto: bool = False  # v32：程序自动处理（低价值发现按暂维持），非用户决策
 
 
 @dataclass
@@ -100,6 +105,10 @@ class Session:
     # 落地性
     feasibility_score: float = 100.0
     feasibility_breakdown: List[str] = field(default_factory=list)
+    # v32 提问聚焦：只对 interactive_ids 中的发现逐题问（高→中→低、金额降序）；
+    # 低价值发现自动按「暂维持」生成 auto_decisions，不进互动轮次
+    interactive_ids: List[str] = field(default_factory=list)
+    auto_decisions: List[Decision] = field(default_factory=list)
 
     @property
     def current_finding_index(self) -> int:
@@ -109,9 +118,10 @@ class Session:
     def current_finding(self) -> Optional[Finding]:
         if self.state != STATE_FINDING_LOOP:
             return None
-        if self.current_finding_index >= len(self.diagnosis.findings):
+        if self.current_finding_index >= len(self.interactive_ids):
             return None
-        return self.diagnosis.findings[self.current_finding_index]
+        fid = self.interactive_ids[self.current_finding_index]
+        return self.diagnosis.finding_by_id(fid)
 
     @property
     def is_export_unlocked(self) -> bool:
@@ -126,20 +136,74 @@ class Session:
 
     @property
     def total_est_saving(self) -> float:
-        return round(sum(d.est_saving for d in self.decisions), 2)
+        return round(sum(d.est_saving for d in self.decisions + self.auto_decisions), 2)
+
+
+def is_low_value(finding: Finding, data: FinancialData) -> bool:
+    """v32 低价值发现判定：低严重度且预计影响金额低于门槛。
+
+    门槛 = max(1000 元, 最新年营收 × 0.05%)。此类发现不进互动轮次，
+    自动按「暂维持」处理并在第二稿中如实列出，决策精力集中于大额问题。
+    """
+    if str(getattr(finding, "severity", "") or "").strip() != "低":
+        return False
+    from . import compliance_policy as compliance_mod
+
+    money = compliance_mod.finding_money_key(finding)
+    years = sorted(data.years or [])
+    revenue = 0.0
+    if years:
+        revenue = float(
+            (data.income_statement.get("营业收入", {}) or {}).get(years[-1], 0.0) or 0.0
+        )
+    threshold = max(LOW_VALUE_ABS_FLOOR, revenue * LOW_VALUE_REVENUE_RATIO)
+    return money < threshold
 
 
 def start_session(data: FinancialData, diagnosis: DiagnosisResult) -> Session:
-    """启动互动会话：若有发现进入 FINDING_LOOP，否则直接 DRAFT2。
+    """启动互动会话：若有需互动的发现进入 FINDING_LOOP，否则直接 DRAFT2。
 
-    发现顺序：低风险（绿）→ 中风险（橙）→ 高风险（红），与诊断页一致。
+    v32 提问聚焦：
+    - 互动顺序 = 高→中→低风险、同级按预计节税金额降序（重点先问，
+      与诊断页低→高展示顺序解耦）
+    - 低价值发现（低严重度且金额影响小）自动按「暂维持」生成决策，
+      不逐题打扰；其决策不参与落地性扣分
     """
     from . import compliance_policy as compliance_mod
 
     # 复制列表再排，避免外部持有旧顺序
-    diagnosis.findings = compliance_mod.sort_findings_by_severity(list(diagnosis.findings or []))
-    sess = Session(data=data, diagnosis=diagnosis)
-    if diagnosis.findings:
+    findings = compliance_mod.sort_findings_for_interaction(list(diagnosis.findings or []))
+    diagnosis.findings = findings
+
+    interactive: List[Finding] = []
+    auto_decisions: List[Decision] = []
+    for f in findings:
+        if is_low_value(f, data):
+            option = next((o for o in f.options if o.label == "C"), None)
+            if option is None and f.options:
+                option = f.options[-1]
+            auto_decisions.append(Decision(
+                finding_id=f.id,
+                finding_title=f.title,
+                option_label=option.label if option else "C",
+                option_name=option.name if option else "暂维持（低影响自动处理）",
+                current_value=f.current_value,
+                target_value=option.target_value if option else f.current_value,
+                est_saving=option.est_saving if option else 0.0,
+                risk_level=option.risk_level if option else RISK_MEDIUM,
+                action_detail=(option.action_note if option else "低影响发现，自动按暂维持处理。"),
+                auto=True,
+            ))
+        else:
+            interactive.append(f)
+
+    sess = Session(
+        data=data,
+        diagnosis=diagnosis,
+        interactive_ids=[f.id for f in interactive],
+        auto_decisions=auto_decisions,
+    )
+    if interactive:
         sess.state = STATE_FINDING_LOOP
     else:
         sess.state = STATE_DRAFT2
@@ -191,17 +255,48 @@ def submit_decision(
     )
     sess.decisions.append(decision)
 
-    # 推进到下一条或进入 DRAFT2
-    if sess.current_finding_index >= len(sess.diagnosis.findings):
+    # 推进到下一条或进入 DRAFT2（v32：完成条件按互动集合，auto 决策已在 start 时生成）
+    if sess.current_finding_index >= len(sess.interactive_ids):
         sess.state = STATE_DRAFT2
         _generate_draft2(sess)
     return decision
+
+
+def _account_series(data: FinancialData, account: str, years: List[int]):
+    """取科目多年序列：优先科目余额表，其次利润表。
+
+    返回 [(年, 值)]（只含有数据的年份）；科目无年度序列返回 None。
+    """
+    for table in (data.account_balances, data.income_statement):
+        mapping = table.get(account) or {}
+        if isinstance(mapping, dict):
+            pairs = [(y, mapping.get(y)) for y in years if mapping.get(y) is not None]
+            if pairs:
+                return pairs
+    return None
+
+
+def _trend_from_account(data: FinancialData, account: str, years: List[int]) -> Optional[str]:
+    """按科目多年序列生成环比同比文本；序列不足两年返回 None（走旧特判/兜底）。"""
+    series = _account_series(data, account, years)
+    if not series or len(series) < 2:
+        return None
+    prev_y, prev_v = series[-2]
+    latest_y, cur = series[-1]
+    if cur == 0 and prev_v == 0:
+        return f"近 {len(series)} 年{account}持续为 0"
+    val, _ = fin.growth_rate(cur, prev_v)
+    return (f"{account} {prev_y}→{latest_y}：{prev_v:,.0f} → {cur:,.0f}"
+            f"（同比 {val:+.2f}%）")
 
 
 def _compute_trend(sess: Session, decision: Decision) -> str:
     """计算当前发现对应指标的环比/同比趋势。
 
     返回文本形式，无历史时标注"无历史，仅列最新值"。
+
+    v32 泛化：发现挂了 account_key（真实科目名）时，优先用科目多年序列
+    生成趋势；否则回退 4 个硬编码发现的特判，最后"无历史"兜底。
     """
     data = sess.data
     years = sorted(data.years)
@@ -219,6 +314,14 @@ def _compute_trend(sess: Session, decision: Decision) -> str:
             for y in years
         ]
 
+    # v32：发现挂接科目 → 科目序列真实趋势（覆盖规则与 AI 发现）
+    finding = sess.diagnosis.finding_by_id(fid)
+    account_key = str(getattr(finding, "account_key", "") or "") if finding else ""
+    if account_key:
+        trend = _trend_from_account(data, account_key, years)
+        if trend:
+            return trend
+
     if fid == "RD_MISSING":
         series = _series(data.income_statement, "研发费用")
         cur = series[-1][1]
@@ -229,7 +332,7 @@ def _compute_trend(sess: Session, decision: Decision) -> str:
         return f"研发费用 {prev}→{latest}：{prev_v:,.0f} → {cur:,.0f}（同比 {val:+.2f}%，{note}）"
 
     if fid == "ENTERTAIN_EXCESS":
-        # 招待费为余额表单值，无年度序列；用管理费用代替说明趋势
+        # 招待费无科目序列时用管理费用代替说明趋势
         series = _series(data.income_statement, "管理费用")
         cur = series[-1][1]
         prev_v = series[-2][1]
@@ -267,11 +370,19 @@ def _build_cautions(decision: Decision, finding: Finding) -> str:
 
 
 def _generate_draft2(sess: Session) -> None:
-    """生成第二稿：每条决策含环比同比、当前值→目标值→变动幅度→预计节税、操作细节、注意事项。"""
+    """生成第二稿：每条决策含环比同比、当前值→目标值→变动幅度→预计节税、操作细节、注意事项。
+
+    v32：按 findings 顺序（高→中→低、金额降序）遍历，合并用户决策与
+    低价值自动决策（auto），每条发现都有对应第二稿条目。
+    """
+    decision_map: Dict[str, Decision] = {}
+    for d in list(sess.decisions) + list(sess.auto_decisions):
+        decision_map[d.finding_id] = d
+
     entries: List[Draft2Entry] = []
-    for d in sess.decisions:
-        finding = sess.diagnosis.finding_by_id(d.finding_id)
-        if finding is None:
+    for finding in sess.diagnosis.findings or []:
+        d = decision_map.get(finding.id)
+        if d is None:
             continue
         trend = _compute_trend(sess, d)
         d.trend = trend
@@ -294,6 +405,9 @@ def _generate_draft2(sess: Session) -> None:
         # 研发类 Option 已显式写入加计扣除比例；旧字段缺失时按 finding_id 推断
         if option is not None and deduction_rate == 0.0 and d.finding_id == "RD_MISSING":
             deduction_rate = 1.0  # 项目测算默认值：研发费用 100% 加计扣除（待核验适用条件）
+        action_detail = d.action_detail
+        if d.auto:
+            action_detail = f"[低影响·自动暂维持] {action_detail}"
         entries.append(Draft2Entry(
             finding_id=d.finding_id,
             finding_title=d.finding_title,
@@ -305,7 +419,7 @@ def _generate_draft2(sess: Session) -> None:
             change_amount=change,
             change_pct=change_pct_text,
             est_saving=d.est_saving,
-            action_detail=d.action_detail,
+            action_detail=action_detail,
             cautions=cautions,
             risk_level=d.risk_level,
             cost_saving=cost_saving,
