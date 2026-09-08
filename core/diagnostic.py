@@ -1546,6 +1546,9 @@ def diagnose(data: FinancialData) -> DiagnosisResult:
     选项 tax_rate 统一取自 PolicySnapshot.E4（导入管线写入）。
     """
     benchmark, fallback = ind.get_benchmark(data.industry)
+    # 下方 stamp_findings_tax_rate 的 policy 链会把 data.industry 就地归一为基准行业名，
+    # 诊断结果必须保留用户原始行业名（行业未匹配仅回退基准，不改写名称）
+    original_industry = data.industry
     findings: List[Finding] = []
 
     checks = [
@@ -1613,7 +1616,7 @@ def diagnose(data: FinancialData) -> DiagnosisResult:
 
     return DiagnosisResult(
         company_name=data.company_name,
-        industry=data.industry,
+        industry=original_industry,
         industry_fallback=fallback,
         years=list(data.years),
         findings=findings,
