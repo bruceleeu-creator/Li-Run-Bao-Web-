@@ -285,7 +285,7 @@ cd collab_board/board_frontend && npm run build && npx playwright test && cd ../
 
 > 端口约定：8080 被宿主宝塔 nginx 占用、8081 看板、8082 主应用（均已放行）；**新增端口需在腾讯云控制台防火墙放行**（自定义 / TCP / 端口 / 0.0.0.0/0 / 允许）。
 >
-> 当前线上版本：2026-09-07 · v1.4.0 + v32 诊断聚焦与出题规则优化（commit `2475d02`，与 GitHub main 同步；经 GitHub Actions CI 七 job 全绿自动上线，部署 target=app 重建 8082 主应用镜像，health 正常；线上冒烟确认互动首题=最高风险、低影响发现自动暂维持）。
+> 当前线上版本：2026-09-09 · v1.4.0 + v32.1 测试债清偿与仓库卫生（commit `2b27621`，与 GitHub main 同步；经 GitHub Actions CI 七 job 全绿自动上线，部署 target=app 重建 8082 主应用镜像，health 正常；线上冒烟确认诊断行业名正常、互动首题=最高风险、低影响发现自动暂维持）。
 
 **一键更新（主应用或看板通用流程）**：
 
