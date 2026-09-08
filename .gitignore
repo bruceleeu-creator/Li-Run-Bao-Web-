@@ -29,6 +29,8 @@ Thumbs.db
 .claude/
 .superpowers/
 .scratch/
+.zcode/
+.hallmark/
 /test-results/
 
 # 发布包产物（不入库，本地构建）
@@ -68,7 +70,6 @@ app.db
 # demo_output/ 默认全部忽略，仅精确放行正式发布的示例产物（xlsx/docx/pdf/png）
 demo_output/*
 !demo_output/.gitkeep
-!demo_output/sample_finance.xlsx
 !demo_output/trend.png
 !demo_output/budget_3sheet_WB-CO-TR-20260726.xlsx
 !demo_output/budget_report_WB-CO-TR-20260726.docx
